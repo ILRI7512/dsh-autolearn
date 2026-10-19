@@ -25,28 +25,43 @@ export const DEFAULTS = Object.freeze({
 
 const MODES = ['assisted', 'auto', 'lab']
 
-/** 仓库内的引擎目录（plugins/autolearn → ../../engine）。 */
-const REPO_ENGINE = fileURLToPath(new URL('../../engine', import.meta.url))
-const LEGACY_ENGINE = 'D:/Adsh/Zdsh/dsh_autonomous_learning'
-
-/** 引擎根目录：环境变量 > 仓库相对路径 > 旧工作区默认位置。 */
-export function engineHome(env = process.env) {
-  if (env.DSH_AL_HOME) return env.DSH_AL_HOME
-  try {
-    if (existsSync(join(REPO_ENGINE, 'config.json'))) return REPO_ENGINE
-  } catch {
-    /* fall through */
+/**
+ * 从插件自身位置向上找引擎目录，避免任何绝对路径：
+ * 命中 `<dir>/dsh_autonomous_learning/config.json` 或 `<dir>/engine/config.json`。
+ */
+function findEngineHome() {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let depth = 0; depth < 8; depth += 1) {
+    for (const name of ['dsh_autonomous_learning', 'engine']) {
+      const candidate = join(dir, name)
+      try {
+        if (existsSync(join(candidate, 'config.json'))) return candidate
+      } catch {
+        /* keep looking */
+      }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
   }
-  return LEGACY_ENGINE
+  return ''
+}
+
+/** 引擎根目录：环境变量 > 从插件位置向上查找。两者都没有时返回空串。 */
+export function engineHome(env = process.env) {
+  return env.DSH_AL_HOME || findEngineHome()
 }
 
 export function settingsPath(env = process.env) {
   if (env.DSH_AL_SETTINGS_FILE) return env.DSH_AL_SETTINGS_FILE
-  return join(engineHome(env), 'data', 'settings.json')
+  const home = engineHome(env)
+  if (!home) throw new Error('engine home not found; set DSH_AL_HOME or keep the plugin inside the repo')
+  return join(home, 'data', 'settings.json')
 }
 
 export function defaultDataDir(env = process.env) {
-  return join(engineHome(env), 'data')
+  const home = engineHome(env)
+  return home ? join(home, 'data') : ''
 }
 
 function normalize(raw) {
@@ -179,8 +194,15 @@ export function settingsRoute(env = process.env) {
 
 export function apply(ctx, config = {}) {
   const env = { ...process.env, ...(config.env ?? {}) }
+  let target = ''
   try {
-    if (!existsSync(settingsPath(env))) {
+    target = settingsPath(env)
+  } catch (error) {
+    console.warn(`[dsh-autolearn] ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  try {
+    if (!existsSync(target)) {
       writeSettings({}, env)
     }
   } catch (error) {
@@ -191,5 +213,5 @@ export function apply(ctx, config = {}) {
     return
   }
   ctx.effect(() => ctx.webServer.register(settingsRoute(env)), 'dsh-autolearn: settings route')
-  console.log(`[dsh-autolearn] settings API ready: ${settingsPath(env)}`)
+  console.log(`[dsh-autolearn] settings API ready: ${target}`)
 }

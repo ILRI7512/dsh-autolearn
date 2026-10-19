@@ -13,7 +13,7 @@
 - 其它调用直接 `next()` 放行；
 - 用户拒绝 → 工具不会执行；宿主会把 ask/outcome 写进会话日志。
 
-风险清单来自 `D:/Adsh/Zdsh/dsh_autonomous_learning/tool_risks.json`，
+风险清单来自 `<repo>/dsh_autonomous_learning/tool_risks.json`，
 由引擎的 `export-tool-risks` 生成；工具增减后重新导出即可，不必改本插件。
 
 ## 配置（cordis.patch.yml）
@@ -24,7 +24,7 @@
       name: '@local/dsh-autolearn-approval'
       config:
         prefix: 'mcp__autolearn__'
-        manifestPath: 'D:/Adsh/Zdsh/dsh_autonomous_learning/tool_risks.json'
+        manifestPath: '<repo>/dsh_autonomous_learning/tool_risks.json'
         askRisks: [execute, destructive]
         askTools: [update_knowledge, invalidate_knowledge, restore_knowledge_base, run_code_test, run_learning_experiment]
         allowTools: []
@@ -44,7 +44,7 @@
 ## 自测
 
 ```powershell
-cd D:\Adsh\Zdsh\dsh-autolearn-approval
+cd <repo>/plugins/approval
 node --check index.js
 node decision_test.mjs
 ```

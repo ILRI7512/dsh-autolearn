@@ -1,7 +1,7 @@
 # runtime data & generated artifacts
-engine/data/
-engine/**/__pycache__/
-engine/.pytest_cache/
+dsh_autonomous_learning/data/
+dsh_autonomous_learning/**/__pycache__/
+dsh_autonomous_learning/.pytest_cache/
 *.pyc
 *.pyo
 

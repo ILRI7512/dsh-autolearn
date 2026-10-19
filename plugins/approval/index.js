@@ -18,15 +18,6 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DEFAULT_PREFIX = 'mcp__autolearn__'
-/** 仓库内的引擎目录（plugins/approval → ../../engine）；安装到别处时由 env / config 覆盖。 */
-const REPO_ENGINE = fileURLToPath(new URL('../../engine', import.meta.url))
-const LEGACY_ENGINE = 'D:/Adsh/Zdsh/dsh_autonomous_learning'
-const ENGINE_HOME = process.env.DSH_AL_HOME || (safeExists(join(REPO_ENGINE, 'tool_risks.json')) ? REPO_ENGINE : LEGACY_ENGINE)
-const DEFAULT_MANIFEST = join(ENGINE_HOME, 'tool_risks.json')
-const DEFAULT_HEARTBEAT = join(ENGINE_HOME, 'data', 'host_approval.heartbeat')
-const DEFAULT_GATE_STATE = join(ENGINE_HOME, 'data', 'host_approval.gate.json')
-const GATE_GENERATION = 2
-const DEFAULT_ASK_RISKS = ['execute', 'destructive']
 
 function safeExists(path) {
   try {
@@ -35,6 +26,28 @@ function safeExists(path) {
     return false
   }
 }
+
+/** 从插件位置向上找引擎目录（含 tool_risks.json），避免写死绝对路径。 */
+function findEngineHome() {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let depth = 0; depth < 8; depth += 1) {
+    for (const name of ['dsh_autonomous_learning', 'engine']) {
+      const candidate = join(dir, name)
+      if (safeExists(join(candidate, 'tool_risks.json'))) return candidate
+    }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return ''
+}
+
+const ENGINE_HOME = process.env.DSH_AL_HOME || findEngineHome()
+const DEFAULT_MANIFEST = ENGINE_HOME ? join(ENGINE_HOME, 'tool_risks.json') : ''
+const DEFAULT_HEARTBEAT = ENGINE_HOME ? join(ENGINE_HOME, 'data', 'host_approval.heartbeat') : ''
+const DEFAULT_GATE_STATE = ENGINE_HOME ? join(ENGINE_HOME, 'data', 'host_approval.gate.json') : ''
+const GATE_GENERATION = 2
+const DEFAULT_ASK_RISKS = ['execute', 'destructive']
 
 const RISK_LABEL = {
   read: '读取',
@@ -47,6 +60,10 @@ const RISK_LABEL = {
 const TARGET_KEYS = ['chunk_id', 'db_file', 'project_id', 'practice_id', 'location', 'path', 'topic']
 
 function loadManifest(path, warn) {
+  if (!path) {
+    warn('未定位到引擎目录（tool_risks.json）；只按配置的 askTools 判定。可设置 DSH_AL_HOME 指定引擎目录。')
+    return {}
+  }
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
     const tools = parsed && typeof parsed.tools === 'object' ? parsed.tools : {}
@@ -125,6 +142,7 @@ export function apply(ctx, config = {}) {
   const heartbeatPath =
     typeof config.heartbeatPath === 'string' && config.heartbeatPath ? config.heartbeatPath : DEFAULT_HEARTBEAT
   const beat = () => {
+    if (!heartbeatPath) return
     try {
       mkdirSync(dirname(heartbeatPath), { recursive: true })
       writeFileSync(
@@ -144,20 +162,22 @@ export function apply(ctx, config = {}) {
   // 这样 Python 端可以把"升级过、随后被禁用"识别为心跳缺失并 fail-closed。
   const gateStatePath =
     typeof config.gateStatePath === 'string' && config.gateStatePath ? config.gateStatePath : DEFAULT_GATE_STATE
-  try {
-    mkdirSync(dirname(gateStatePath), { recursive: true })
-    writeFileSync(
-      gateStatePath,
-      JSON.stringify({
-        generation: GATE_GENERATION,
-        installedAt: new Date().toISOString(),
-        prefix,
-        plugin: '@local/dsh-autolearn-approval',
-      }),
-      'utf8',
-    )
-  } catch (error) {
-    warn(`闸门标记写入失败（${gateStatePath}）：${error instanceof Error ? error.message : String(error)}`)
+  if (gateStatePath) {
+    try {
+      mkdirSync(dirname(gateStatePath), { recursive: true })
+      writeFileSync(
+        gateStatePath,
+        JSON.stringify({
+          generation: GATE_GENERATION,
+          installedAt: new Date().toISOString(),
+          prefix,
+          plugin: '@local/dsh-autolearn-approval',
+        }),
+        'utf8',
+      )
+    } catch (error) {
+      warn(`闸门标记写入失败（${gateStatePath}）：${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   const cleanupHeartbeat = () => {

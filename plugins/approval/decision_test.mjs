@@ -1,29 +1,31 @@
 /**
  * 审批判定自测（不启动 Harness）。
- *
- * 风险清单优先用仓库内的 engine/tool_risks.json；从已安装目录运行时
- * 退回旧的工作区路径。这样同一份测试在仓库与本地安装目录都能跑。
+ * 风险清单从插件位置向上查找引擎目录，不依赖绝对路径。
  */
 import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { decideApproval } from './index.js'
 
-function loadManifest() {
-  const candidates = [
-    fileURLToPath(new URL('../../engine/tool_risks.json', import.meta.url)),
-    'D:/Adsh/Zdsh/dsh_autonomous_learning/tool_risks.json',
-  ]
-  for (const path of candidates) {
-    try {
-      return JSON.parse(readFileSync(path, 'utf8')).tools
-    } catch {
-      continue
+function findManifest() {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let depth = 0; depth < 8; depth += 1) {
+    for (const name of ['dsh_autonomous_learning', 'engine']) {
+      const candidate = join(dir, name, 'tool_risks.json')
+      try {
+        return JSON.parse(readFileSync(candidate, 'utf8')).tools
+      } catch {
+        /* keep looking */
+      }
     }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
   }
-  throw new Error(`tool_risks.json not found; tried: ${candidates.join(', ')}`)
+  throw new Error('tool_risks.json not found; keep the plugin inside the repo or set DSH_AL_HOME')
 }
 
-const table = loadManifest()
+const table = findManifest()
 const base = {
   prefix: 'mcp__autolearn__',
   table,

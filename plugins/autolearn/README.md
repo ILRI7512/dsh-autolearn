@@ -10,7 +10,7 @@
 | 插件名 | `@local/dsh-autolearn`（Plugin Manager 可见） |
 | 提供的 MCP 服务器 | `serverName: autolearn` |
 | 工具名 | `mcp__autolearn__*`（63 个） |
-| 引擎位置 | `D:\Adsh\Zdsh\dsh_autonomous_learning`（Python） |
+| 引擎位置 | `<repo>/dsh_autonomous_learning`（Python） |
 | 审批闸门 | 配套插件 `@local/dsh-autolearn-approval` |
 
 ## patch 做了什么
@@ -22,7 +22,7 @@
       config:
         serverName: autolearn
         transport: stdio
-        command: 'D:/Python/python.exe'
+        command: 'python'
         args: ['-m', 'dsh_autonomous_learning.plugin']
         ...
 ```

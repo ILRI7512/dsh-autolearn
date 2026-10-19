@@ -11,7 +11,7 @@
     "syntax": "node --check plugins/approval/index.js && node --check plugins/autolearn/index.js && node --check plugins/autolearn/client.js",
     "check": "node plugins/approval/decision_test.mjs && node plugins/autolearn/settings_test.mjs && node plugins/autolearn/route_test.mjs",
     "test": "pnpm run syntax && pnpm run check",
-    "py:install": "python -m pip install -r engine/requirements.txt",
-    "py:test": "python -m pytest engine/tests"
+    "py:install": "python -m pip install -r dsh_autonomous_learning/requirements.txt",
+    "py:test": "python -m pytest dsh_autonomous_learning/tests"
   }
 }

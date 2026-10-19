@@ -17,7 +17,7 @@ MCP 协议握手已用真实客户端验证（63 个工具可被列出并调用�
 | DSH 版本/插件机制 | DSH Desktop 使用 Cordis 插件体系，profile 位于 `%USERPROFILE%\.dsh\profiles\desktop`；已安装 `dsh-mcp-connector@0.2.75` | **不写 Cordis/npm 插件**，改用 MCP stdio 接入；不碰 DSH 内核文件 |
 | 工具调用协议 | MCP（`mcp` Python SDK 1.27.2 已安装）；连接器支持 stdio/streamable-http | 直接用官方 MCP SDK 暴露 60+ 工具，DSH 侧以 `mcp__<server>__<tool>` 调用 |
 | 模型接口 | profile 配置了 OpenAI 兼容 provider（`commandcode`，`/provider/v1`），密钥在凭据引用中；**子进程环境不可见** | 模型适配层可配置，默认 `mock`；无密钥时规则路径照常工作，不伪造模型调用 |
-| Python | 3.13.5（`D:\Python`）；pip 26.1.1；可访问 PyPI | 以 3.13 为目标 |
+| Python | 3.13.5（本机 `python`）；pip 26.1.1；可访问 PyPI | 以 3.13 为目标 |
 | 向量库 | 未安装 Chroma / Qdrant / sentence-transformers | **自研轻量向量层**：SQLite 元数据 + `.npy` 矩阵 + 余弦检索；零重依赖、离线可跑、可精确测试 |
 | 文档解析 | `pypdf 6.21.1`、`python-docx`、`beautifulsoup4 4.14.3` 可用 | 支持 PDF/DOCX/HTML/Markdown/代码文件 |
 | 测试 | `pytest 9.1.1` | 每阶段执行真实测试 |
@@ -60,7 +60,7 @@ dsh_autonomous_learning/
 ├── data/                     # 运行时数据（DB/索引/文档/报告/实验产物）
 └── tests/                    # 96 项 pytest 用例
 
-D:\Adsh\Zdsh\
+<repo>\
 ├── dsh-autolearn\             # DSH 插件包 1：把引擎注册为 MCP 服务器（配置型 bundle）
 └── dsh-autolearn-approval\    # DSH 插件包 2：高风险调用接入 DSH 审批弹窗
 ```
@@ -70,7 +70,7 @@ D:\Adsh\Zdsh\
 ## 2. 安装
 
 ```powershell
-cd D:\Adsh\Zdsh                     # 注意：要在此父目录执行，包名才是 dsh_autonomous_learning
+cd <repo>                     # 注意：要在此父目录执行，包名才是 dsh_autonomous_learning
 python -m pip install -r dsh_autonomous_learning\requirements.txt
 python -m dsh_autonomous_learning.main --home dsh_autonomous_learning init
 ```
@@ -78,8 +78,8 @@ python -m dsh_autonomous_learning.main --home dsh_autonomous_learning init
 ## 3. 本地使用（CLI）
 
 ```powershell
-cd D:\Adsh\Zdsh
-$env:PYTHONPATH = "D:\Adsh\Zdsh"
+cd <repo>
+$env:PYTHONPATH = "<repo>"
 
 # 1) 创建学习项目（自动生成计划）
 python -m dsh_autonomous_learning.main project-create `
@@ -114,15 +114,15 @@ python -m dsh_autonomous_learning.main tools call search_knowledge '{"query":"�
 
 | 插件包 | 位置 | 作用 |
 | --- | --- | --- |
-| `@local/dsh-autolearn` | `D:\Adsh\Zdsh\dsh-autolearn` | 配置型 bundle：自动注册 MCP stdio 服务器（`serverName: autolearn`） |
-| `@local/dsh-autolearn-approval` | `D:\Adsh\Zdsh\dsh-autolearn-approval` | Host 插件：高风险工具调用接入 DSH 原生审批弹窗 |
+| `@local/dsh-autolearn` | `<repo>/plugins/autolearn` | 配置型 bundle：自动注册 MCP stdio 服务器（`serverName: autolearn`） |
+| `@local/dsh-autolearn-approval` | `<repo>/plugins/approval` | Host 插件：高风险工具调用接入 DSH 原生审批弹窗 |
 
 安装（二者都已安装并 applied）：
 
 ```powershell
 # 在 DSH 里由 plugin_manager 完成；等价命令：
-#   install_bundle target=D:\Adsh\Zdsh\dsh-autolearn
-#   install_bundle target=D:\Adsh\Zdsh\dsh-autolearn-approval
+#   install_bundle target=<repo>/plugins/autolearn
+#   install_bundle target=<repo>/plugins/approval
 ```
 
 安装后的效果：
@@ -142,8 +142,8 @@ python -m dsh_autonomous_learning.main tools call search_knowledge '{"query":"�
 设置 → 插件 → MCP 连接器 → 新增 stdio 连接：
 
 - serverName：`autolearn`，命令 `python`，参数 `-m dsh_autonomous_learning.plugin`
-- 工作目录 `D:\Adsh\Zdsh`
-- 环境变量 `DSH_AL_HOME=D:\Adsh\Zdsh\dsh_autonomous_learning`、`PYTHONPATH=D:\Adsh\Zdsh`
+- 工作目录 `<repo>`
+- 环境变量 `DSH_AL_HOME=<repo>/dsh_autonomous_learning`、`PYTHONPATH=<repo>`
 
 </details>
 
@@ -154,7 +154,7 @@ python -m dsh_autonomous_learning.main tools call search_knowledge '{"query":"�
 | 半边 | 位置 | 职责 |
 | --- | --- | --- |
 | 判定清单 | `tool_risks.json`（`export-tool-risks` 生成） | 每个工具的风险等级与是否需要确认，只维护一份 |
-| 宿主闸门 | `D:\Adsh\Zdsh\dsh-autolearn-approval`（Cordis 插件，已安装启用） | 在 `tools/pre-execute` 里对高风险调用返回 `{kind:'ask'}`，弹出 **DSH 原生审批框** |
+| 宿主闸门 | `<repo>/plugins/approval`（Cordis 插件，已安装启用） | 在 `tools/pre-execute` 里对高风险调用返回 `{kind:'ask'}`，弹出 **DSH 原生审批框** |
 | 引擎 | `security/permissions.py` | `DSH_AL_HOST_APPROVAL=1` 时不再要求 confirm_token，把把关交给宿主 |
 
 判定规则（默认）：`risk=execute` 或 `destructive` 的调用、以及显式列出的
@@ -185,7 +185,7 @@ python -m dsh_autonomous_learning.main confirmations approve <token>
 手动复核闸门判定（不启动 Harness）：
 
 ```powershell
-cd D:\Adsh\Zdsh\dsh-autolearn-approval
+cd <repo>/plugins/approval
 node decision_test.mjs   # 用真实 tool_risks.json 验证 8 条判定
 ```
 
@@ -274,8 +274,8 @@ node decision_test.mjs   # 用真实 tool_risks.json 验证 8 条判定
 ## 8. 测试与真实结果
 
 ```powershell
-cd D:\Adsh\Zdsh
-$env:PYTHONPATH = "D:\Adsh\Zdsh"
+cd <repo>
+$env:PYTHONPATH = "<repo>"
 python -m pytest dsh_autonomous_learning\tests
 ```
 
