@@ -12,6 +12,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, isAbsolute } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const inject = ['webServer']
 
@@ -24,9 +25,19 @@ export const DEFAULTS = Object.freeze({
 
 const MODES = ['assisted', 'auto', 'lab']
 
-/** 引擎根目录：优先环境变量（与 MCP 行一致），否则用安装时的默认位置。 */
+/** 仓库内的引擎目录（plugins/autolearn → ../../engine）。 */
+const REPO_ENGINE = fileURLToPath(new URL('../../engine', import.meta.url))
+const LEGACY_ENGINE = 'D:/Adsh/Zdsh/dsh_autonomous_learning'
+
+/** 引擎根目录：环境变量 > 仓库相对路径 > 旧工作区默认位置。 */
 export function engineHome(env = process.env) {
-  return env.DSH_AL_HOME || 'D:/Adsh/Zdsh/dsh_autonomous_learning'
+  if (env.DSH_AL_HOME) return env.DSH_AL_HOME
+  try {
+    if (existsSync(join(REPO_ENGINE, 'config.json'))) return REPO_ENGINE
+  } catch {
+    /* fall through */
+  }
+  return LEGACY_ENGINE
 }
 
 export function settingsPath(env = process.env) {

@@ -1,0 +1,17 @@
+{
+  "name": "dsh-autolearn",
+  "version": "1.1.0",
+  "private": true,
+  "description": "DSH autonomous-learning plugins: MCP engine registration, approval gate, settings card.",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "syntax": "node --check plugins/approval/index.js && node --check plugins/autolearn/index.js && node --check plugins/autolearn/client.js",
+    "check": "node plugins/approval/decision_test.mjs && node plugins/autolearn/settings_test.mjs && node plugins/autolearn/route_test.mjs",
+    "test": "pnpm run syntax && pnpm run check",
+    "py:install": "python -m pip install -r engine/requirements.txt",
+    "py:test": "python -m pytest engine/tests"
+  }
+}

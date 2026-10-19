@@ -13,15 +13,28 @@
  * 因此工具风险清单只维护一份，避免 UI 与引擎各写一套。
  */
 
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const DEFAULT_PREFIX = 'mcp__autolearn__'
-const DEFAULT_MANIFEST = 'D:/Adsh/Zdsh/dsh_autonomous_learning/tool_risks.json'
-const DEFAULT_HEARTBEAT = 'D:/Adsh/Zdsh/dsh_autonomous_learning/data/host_approval.heartbeat'
-const DEFAULT_GATE_STATE = 'D:/Adsh/Zdsh/dsh_autonomous_learning/data/host_approval.gate.json'
+/** 仓库内的引擎目录（plugins/approval → ../../engine）；安装到别处时由 env / config 覆盖。 */
+const REPO_ENGINE = fileURLToPath(new URL('../../engine', import.meta.url))
+const LEGACY_ENGINE = 'D:/Adsh/Zdsh/dsh_autonomous_learning'
+const ENGINE_HOME = process.env.DSH_AL_HOME || (safeExists(join(REPO_ENGINE, 'tool_risks.json')) ? REPO_ENGINE : LEGACY_ENGINE)
+const DEFAULT_MANIFEST = join(ENGINE_HOME, 'tool_risks.json')
+const DEFAULT_HEARTBEAT = join(ENGINE_HOME, 'data', 'host_approval.heartbeat')
+const DEFAULT_GATE_STATE = join(ENGINE_HOME, 'data', 'host_approval.gate.json')
 const GATE_GENERATION = 2
 const DEFAULT_ASK_RISKS = ['execute', 'destructive']
+
+function safeExists(path) {
+  try {
+    return existsSync(path)
+  } catch {
+    return false
+  }
+}
 
 const RISK_LABEL = {
   read: '读取',

@@ -35,6 +35,20 @@ scripts/relocate.ps1        # 把 patch/index.js 里的绝对路径改成本机�
 核心纪律：**未核验的内容不会当成事实**。`verified` 需要方法匹配 + pass + 证据，
 且满足证据条数/独立来源/来源质量门槛；观点与假设永远不能升级为已验证事实。
 
+## pnpm 工作区
+
+仓库根是 pnpm workspace（`pnpm-workspace.yaml` 收 `plugins/*`），两个插件作为工作区包
+`@local/dsh-autolearn` 与 `@local/dsh-autolearn-approval` 管理：
+
+```bash
+pnpm install      # 生成/更新 pnpm-lock.yaml，链接两个工作区包
+pnpm test         # node 语法检查 + 审批判定 / 设置读写 / 设置路由 三个自测
+pnpm py:test      # 96 项 pytest（需先 pip install -r engine/requirements.txt）
+```
+
+发布到 npm 前需要把 `@local/*` 改成你的 scope（例如 `@yourname/dsh-autolearn`），
+并去掉 `private: true`；DSH 安装时仍用 `plugin_manager install_bundle <目录>`。
+
 ## 快速开始（只用引擎）
 
 ```bash

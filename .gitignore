@@ -7,7 +7,6 @@ engine/.pytest_cache/
 
 # node
 node_modules/
-pnpm-lock.yaml
 
 # editor / OS
 .DS_Store
