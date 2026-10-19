@@ -1,0 +1,21 @@
+# runtime data & generated artifacts
+engine/data/
+engine/**/__pycache__/
+engine/.pytest_cache/
+*.pyc
+*.pyo
+
+# node
+node_modules/
+pnpm-lock.yaml
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# logs & local config
+*.log
+.env
+config.local.json

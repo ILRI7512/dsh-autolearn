@@ -1,0 +1,16 @@
+- insert:
+    - id: autolearn-approval
+      name: '@local/dsh-autolearn-approval'
+      config:
+        prefix: 'mcp__autolearn__'
+        manifestPath: 'D:/Adsh/Zdsh/dsh_autonomous_learning/tool_risks.json'
+        askRisks:
+          - execute
+          - destructive
+        askTools:
+          - update_knowledge
+          - invalidate_knowledge
+          - restore_knowledge_base
+          - run_code_test
+          - run_learning_experiment
+        allowTools: []

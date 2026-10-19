@@ -1,0 +1,20 @@
+# 自主学习插件（配置型 bundle）：把 Python 引擎作为 MCP stdio 服务器接入 DSH。
+# 安装后工具以 mcp__autolearn__* 暴露；审批由 @local/dsh-autolearn-approval 闸门接管。
+- insert:
+    - id: autolearn-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: autolearn
+        transport: stdio
+        command: 'D:/Python/python.exe'
+        args:
+          - '-m'
+          - 'dsh_autonomous_learning.plugin'
+        cwd: 'D:/Adsh/Zdsh'
+        env:
+          DSH_AL_HOME: 'D:/Adsh/Zdsh/dsh_autonomous_learning'
+          PYTHONPATH: 'D:/Adsh/Zdsh'
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
+          DSH_AL_HOST_APPROVAL: '1'
+        failOnStartupError: true
