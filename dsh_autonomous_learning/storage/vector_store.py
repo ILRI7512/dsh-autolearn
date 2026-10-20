@@ -93,6 +93,7 @@ class KnowledgeStore:
         self._matrix: np.ndarray = np.zeros((0, embedder.dim or 0), dtype=np.float32)
         self._dirty = False
         self._last_error = ""
+        self._lock_error = ""
         self._load_index()
 
     @contextmanager
@@ -101,16 +102,25 @@ class KnowledgeStore:
 
         path = self.index_dir / ".index.lock"
         handle = open(path, "a+", encoding="utf-8")
-        import fcntl  # POSIX；Windows 上没有
-
+        locked = False
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
+            except OSError as exc:
+                # 某些文件系统（Android /sdcard 的 FUSE、部分网络盘）不支持 flock。
+                # 降级为无锁并在索引清单元数据里留痕，而不是让整个写入失败。
+                self._lock_error = f"flock 不可用，降级为无锁: {exc}"
             yield
         finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
+            if locked:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            handle.close()
 
     def _sync_from_disk(self) -> None:
         """写前对齐磁盘上的最新索引，避免多实例互相覆盖（lost update）。"""

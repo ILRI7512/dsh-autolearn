@@ -215,3 +215,20 @@ def test_duplicate_content_is_registered_at_write_time(runtime):
     assert {rows[0]["chunk_a"], rows[0]["chunk_b"]} == {"d1", "d2"}
     assert runtime.metadata.get_chunk("d1") is not None
     assert runtime.metadata.get_chunk("d2") is None
+
+
+def test_write_survives_filesystem_without_flock(runtime, monkeypatch):
+    """文件系统不支持 flock（如 Android /sdcard 的 FUSE）时写入仍要成功。"""
+
+    import fcntl
+
+    def boom(*args, **kwargs):
+        raise OSError(38, "Function not implemented")
+
+    monkeypatch.setattr(fcntl, "flock", boom)
+    ensure_project(runtime, "prj_test")
+    result = runtime.store.add_chunks(
+        [{"chunk_id": "c_nolock", "project_id": "prj_test", "title": "无锁", "content": "无锁也要能写入。"}]
+    )
+    assert result["added"] == 1
+    assert runtime.metadata.get_chunk("c_nolock") is not None
