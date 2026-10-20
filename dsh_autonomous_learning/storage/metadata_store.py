@@ -22,9 +22,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from ..core.models import new_id
 from .tokenizer import BM25Params, expand_query
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: 逐版本迁移步骤（在新库上由 SCHEMA_SQL 直接建好，旧库按版本号补齐）。
+#: 每条语句都必须是幂等的：迁移可能在部分失败后重跑。
+MIGRATIONS: Dict[int, Tuple[str, ...]] = {
+    2: (
+        "CREATE INDEX IF NOT EXISTS idx_chunks_content_proj ON chunks(project_id, content_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_sources_location ON sources(project_id, location)",
+    ),
+}
 
 
 class StorageError(RuntimeError):
@@ -185,6 +195,8 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_chunks_partition ON chunks(partition);
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_content_proj ON chunks(project_id, content_hash);
+CREATE INDEX IF NOT EXISTS idx_sources_location ON sources(project_id, location);
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_domain ON chunks(domain, topic);
 CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status, verification_status);
@@ -659,6 +671,13 @@ class MetadataStore:
                 raise
 
     def migrate(self) -> None:
+        """建表 + 逐版本迁移。
+
+        旧实现只有版本号没有迁移步骤：``CREATE TABLE IF NOT EXISTS`` 会跳过
+        已存在的表，因此后续加列/加索引在旧库上永远不生效，运行期直接
+        ``no such column``。这里按 ``MIGRATIONS`` 逐版本执行。
+        """
+
         with self.transaction() as conn:
             conn.executescript(SCHEMA_SQL)
             cur = conn.execute("SELECT value FROM meta WHERE key='schema_version'")
@@ -668,12 +687,23 @@ class MetadataStore:
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
-            else:
-                found = int(row["value"])
-                if found > SCHEMA_VERSION:
-                    raise StorageError(
-                        f"数据库 schema 版本 {found} 高于代码支持的 {SCHEMA_VERSION}，请升级插件"
-                    )
+                return
+            found = int(row["value"])
+            if found > SCHEMA_VERSION:
+                raise StorageError(
+                    f"数据库 schema 版本 {found} 高于代码支持的 {SCHEMA_VERSION}，请升级插件"
+                )
+            for version in range(found + 1, SCHEMA_VERSION + 1):
+                for statement in MIGRATIONS.get(version, ()):
+                    try:
+                        conn.execute(statement)
+                    except sqlite3.OperationalError as exc:  # 幂等重跑
+                        if "already exists" not in str(exc).lower():
+                            raise
+            if found < SCHEMA_VERSION:
+                conn.execute(
+                    "UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
+                )
 
     # ------------------------------------------------------------------ #
     # 通用读写
@@ -726,16 +756,14 @@ class MetadataStore:
         if not pk:
             raise StorageError(f"表 {table} 没有主键，无法 upsert")
         row = _coerce_row(table, row)
-        encoded = self._encode(table, row)
-        cols = ", ".join(encoded)
-        marks = ", ".join("?" * len(encoded))
-        updates = ", ".join(f"{c}=excluded.{c}" for c in encoded if c != pk)
-        with self.transaction() as conn:
-            conn.execute(
-                f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
-                f"ON CONFLICT({pk}) DO UPDATE SET {updates}",
-                list(encoded.values()),
-            )
+        if not row.get(pk):
+            raise StorageError(f"表 {table} 的 upsert 必须提供主键 {pk}")
+        # 已存在就走 UPDATE：部分列 upsert 不该因为其它 NOT NULL 列缺失而失败
+        if self.get(table, row[pk], pk) is not None:
+            self.update(table, row[pk], {k: v for k, v in row.items() if k != pk})
+            return dict(row)
+        row = _stamp_row(table, row)
+        self.insert(table, row)
         return dict(row)
 
     def update(self, table: str, id_value: Any, fields: Mapping[str, Any]) -> int:
@@ -767,9 +795,32 @@ class MetadataStore:
             cur = conn.execute(f"DELETE FROM {table} WHERE {pk}=?", (id_value,))
             return cur.rowcount
 
+    READONLY_PREFIXES = ("SELECT", "WITH", "PRAGMA", "EXPLAIN")
+
     def query(self, sql: str, params: Sequence[Any] = ()) -> List[sqlite3.Row]:
+        """只读查询。
+
+        历史问题：有调用方用 ``query("DELETE ...")`` 删数据，而 ``query`` 不会
+        commit，删除被静默回滚且连接留下悬挂写事务。这里显式拒绝非只读语句，
+        写操作必须走 ``execute_write`` / ``insert`` / ``update`` / ``upsert``。
+        """
+
+        head = (sql or "").lstrip().split(None, 1)
+        prefix = head[0].upper() if head else ""
+        if not prefix.startswith(self.READONLY_PREFIXES):
+            raise StorageError(
+                f"query() 只接受只读语句，收到 {prefix or '<空>'}；"
+                "写操作请使用 execute_write()/insert()/update()/upsert()"
+            )
         with self._lock:
             return list(self.conn.execute(sql, params).fetchall())
+
+    def execute_write(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """执行并提交一条写语句，返回受影响行数。"""
+
+        with self.transaction() as conn:
+            cur = conn.execute(sql, params)
+            return int(cur.rowcount)
 
     def query_dicts(self, sql: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
         return [dict(r) for r in self.query(sql, params)]
@@ -911,9 +962,39 @@ class MetadataStore:
         return dict(chunk)
 
     def upsert_chunk(self, chunk: Mapping[str, Any]) -> Dict[str, Any]:
-        self.upsert("chunks", chunk)
-        self._reindex_chunk(chunk)
+        self.upsert_chunks_bulk([chunk])
         return dict(chunk)
+
+    def upsert_chunks_bulk(self, chunks: Sequence[Mapping[str, Any]]) -> int:
+        """批量写知识片段：正行与倒排索引在**同一个事务**里完成。
+
+        单条 ``upsert`` + ``_reindex_chunk`` 是两个事务，中途失败会出现
+        "chunks 有、tokens 缺"，关键词通道静默漏召回。
+        """
+
+        if not chunks:
+            return 0
+        written = 0
+        with self.transaction() as conn:
+            for chunk in chunks:
+                if "chunk_id" not in chunk:
+                    raise StorageError("知识片段缺少 chunk_id")
+                row = _stamp_row("chunks", _coerce_row("chunks", chunk))
+                encoded = self._encode("chunks", row)
+                cols = ", ".join(encoded)
+                marks = ", ".join("?" * len(encoded))
+                updates = ", ".join(f"{c}=excluded.{c}" for c in encoded if c != "chunk_id")
+                conn.execute(
+                    f"INSERT INTO chunks ({cols}) VALUES ({marks}) "
+                    f"ON CONFLICT(chunk_id) DO UPDATE SET {updates}",
+                    list(encoded.values()),
+                )
+                merged = self._decode(
+                    "chunks", conn.execute("SELECT * FROM chunks WHERE chunk_id=?", (row["chunk_id"],)).fetchone()
+                ) or dict(row)
+                self._reindex_chunk_conn(conn, merged)
+                written += 1
+        return written
 
     def update_chunk(self, chunk_id: str, fields: Mapping[str, Any]) -> None:
         fields = {**fields, "updated_at": fields.get("updated_at") or _now()}
@@ -999,6 +1080,10 @@ class MetadataStore:
     # 词元索引 / BM25
     # ------------------------------------------------------------------ #
     def _reindex_chunk(self, chunk: Mapping[str, Any]) -> None:
+        with self.transaction() as conn:
+            self._reindex_chunk_conn(conn, chunk)
+
+    def _reindex_chunk_conn(self, conn: sqlite3.Connection, chunk: Mapping[str, Any]) -> None:
         from .tokenizer import term_frequencies, tokenize
 
         text = "\n".join(
@@ -1006,16 +1091,15 @@ class MetadataStore:
         )
         freqs = term_frequencies(text)
         length = len(tokenize(text))
-        with self.transaction() as conn:
-            conn.execute("DELETE FROM tokens WHERE chunk_id=?", (chunk["chunk_id"],))
-            conn.executemany(
-                "INSERT OR REPLACE INTO tokens(chunk_id, token, tf) VALUES (?,?,?)",
-                [(chunk["chunk_id"], tok, tf) for tok, tf in freqs.items()],
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO chunk_lex(chunk_id, length) VALUES (?,?)",
-                (chunk["chunk_id"], length),
-            )
+        conn.execute("DELETE FROM tokens WHERE chunk_id=?", (chunk["chunk_id"],))
+        conn.executemany(
+            "INSERT OR REPLACE INTO tokens(chunk_id, token, tf) VALUES (?,?,?)",
+            [(chunk["chunk_id"], tok, tf) for tok, tf in freqs.items()],
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO chunk_lex(chunk_id, length) VALUES (?,?)",
+            (chunk["chunk_id"], length),
+        )
 
     def delete_chunk(self, chunk_id: str) -> int:
         with self.transaction() as conn:
@@ -1143,6 +1227,38 @@ class MetadataStore:
             args.append(project_id)
         sql += " ORDER BY similarity DESC"
         return self.query_dicts(sql, args)
+
+    def record_duplicate(
+        self,
+        *,
+        project_id: str,
+        chunk_a: str,
+        chunk_b: str,
+        similarity: float = 0.0,
+        reason: str = "",
+    ) -> bool:
+        """登记一条重复关系（同一对片段只登记一次，返回是否新增）。"""
+
+        if not project_id or not chunk_a or not chunk_b or chunk_a == chunk_b:
+            return False
+        pair = {chunk_a, chunk_b}
+        for row in self.list_duplicates(project_id):
+            if {row.get("chunk_a"), row.get("chunk_b")} == pair:
+                return False
+        self.insert(
+            "duplicates",
+            {
+                "dup_id": new_id("dup"),
+                "project_id": project_id,
+                "chunk_a": chunk_a,
+                "chunk_b": chunk_b,
+                "similarity": float(similarity),
+                "reason": reason,
+                "status": "open",
+                "created_at": _now(),
+            },
+        )
+        return True
 
     def add_edge(self, edge: Mapping[str, Any]) -> None:
         self.insert("edges", edge)
@@ -1379,6 +1495,19 @@ def _coerce_row(table: str, row: Any) -> Mapping[str, Any]:
     if callable(to_row):
         return to_row()
     raise StorageError(f"表 {table} 的行数据必须是 Mapping 或带 to_row() 的实体，收到 {type(row).__name__}")
+
+
+def _stamp_row(table: str, row: Mapping[str, Any]) -> Dict[str, Any]:
+    """为带时间戳的表补齐 created_at/updated_at（部分列 upsert 需要）。"""
+
+    out = dict(row)
+    columns = COLUMNS.get(table, ())
+    now = _now()
+    if "created_at" in columns and not out.get("created_at"):
+        out["created_at"] = now
+    if "updated_at" in columns and not out.get("updated_at"):
+        out["updated_at"] = now
+    return out
 
 
 def _now() -> str:

@@ -21,9 +21,10 @@ import json
 import os
 import shutil
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -44,6 +45,26 @@ from .tokenizer import expand_query
 
 INDEX_VERSION = 1
 MANIFEST = "manifest.json"
+
+#: 只在"状态机/核验流程"里才允许修改的字段。
+#: 普通写入（重新提取、重复提交）不得改动它们，否则已验证知识会被静默降级。
+STATE_FIELDS = frozenset(
+    {
+        "status",
+        "level",
+        "verification_status",
+        "verification_method",
+        "verification_evidence",
+        "evidence_count",
+        "evidence_independence",
+        "confidence",
+        "confidence_basis",
+        "invalidated_at",
+        "superseded_by",
+        "version",
+        "created_at",
+    }
+)
 VECTORS = "vectors.npy"
 IDS = "ids.json"
 
@@ -72,6 +93,38 @@ class KnowledgeStore:
         self._matrix: np.ndarray = np.zeros((0, embedder.dim or 0), dtype=np.float32)
         self._dirty = False
         self._last_error = ""
+        self._load_index()
+
+    @contextmanager
+    def _index_lock(self) -> Iterator[None]:
+        """跨进程索引写锁（POSIX flock；不支持时退化为进程内锁）。"""
+
+        path = self.index_dir / ".index.lock"
+        handle = open(path, "a+", encoding="utf-8")
+        import fcntl  # POSIX；Windows 上没有
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
+    def _sync_from_disk(self) -> None:
+        """写前对齐磁盘上的最新索引，避免多实例互相覆盖（lost update）。"""
+
+        if not self.manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if manifest.get("embedder_id") != self.embedder.embedder_id:
+            return
+        if int(manifest.get("count", -1)) == len(self._ids):
+            return
         self._load_index()
 
     # ------------------------------------------------------------------ #
@@ -180,7 +233,16 @@ class KnowledgeStore:
         return matrix
 
     def add_chunks(self, chunks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-        """批量写入知识片段（幂等：同 chunk_id 覆盖；同内容指纹识别重复）。"""
+        """批量写入知识片段。
+
+        写入语义（v1.2 修正）：
+        - **新片段**：按内容指纹生成，缺省字段用默认值补齐；
+        - **已存在片段**：只写调用方显式给出的非状态字段，状态/核验/版本字段
+          一律保留库内现值。历史实现用 ``Chunk()`` 默认值补齐后整行覆盖，
+          会把 verified/v3 静默打回 pending/v1 且不留快照；
+        - **同内容不同来源**：两条都保留（署名与来源不同），但自动登记到
+          ``duplicates`` 表，不再"只报告不落地"。
+        """
 
         if not chunks:
             return {"added": 0, "updated": 0, "duplicates": [], "chunks": []}
@@ -188,18 +250,61 @@ class KnowledgeStore:
         seen_content: Dict[str, str] = {}
         duplicates: List[Dict[str, Any]] = []
         for raw in chunks:
-            chunk = _coerce_chunk(raw)
-            fp = chunk.get("content_hash") or stable_hash(normalize_text(chunk["content"]))
-            chunk["content_hash"] = fp
+            cid = str(raw.get("chunk_id") or "")
+            existing = self.metadata.get_chunk(cid) if cid else None
+            if existing:
+                chunk = _merge_existing(existing, raw)
+                if _content_changed(existing, raw):
+                    self.metadata.add_version(
+                        {
+                            "id": new_id("ver"),
+                            "chunk_id": cid,
+                            "version": int(existing.get("version", 1)),
+                            "content_hash": existing.get("content_hash", ""),
+                            "content": existing.get("content", ""),
+                            "status": existing.get("status", ""),
+                            "change_reason": "content_changed",
+                            "changed_at": utcnow_iso(),
+                        }
+                    )
+                    # 实质内容变更：旧证据不再适用，必须重新核验（不直接复用 verified）
+                    chunk.update(
+                        {
+                            "version": int(existing.get("version", 1)) + 1,
+                            "status": KnowledgeStatus.PENDING_VERIFICATION.value,
+                            "level": "L2",
+                            "verification_status": "unverified",
+                            "verification_method": "none",
+                            "verification_evidence": [],
+                            "evidence_count": 0,
+                            "evidence_independence": 0,
+                            "confidence": 0.3,
+                            "confidence_basis": "内容已实质变更，历史核验证据不再适用",
+                        }
+                    )
+            else:
+                chunk = _coerce_chunk(raw)
+            text_for_fp = str(chunk.get("content") or (existing or {}).get("content") or "")
+            fp = chunk.get("content_hash") or stable_hash(normalize_text(text_for_fp))
+            if existing and "content" not in chunk:
+                # 只改元数据：沿用库内指纹，不重新计算
+                chunk["content_hash"] = existing.get("content_hash") or fp
+                fp = chunk["content_hash"]
+            else:
+                chunk["content_hash"] = fp
             existing_same = self.metadata.find_chunks_by_hash(fp, chunk.get("project_id"))
             same_other = [c for c in existing_same if c["chunk_id"] != chunk["chunk_id"]]
-            if same_other or fp in seen_content:
+            dup_of = same_other[0]["chunk_id"] if same_other else seen_content.get(fp, "")
+            if dup_of:
                 duplicates.append(
-                    {
-                        "chunk_id": chunk["chunk_id"],
-                        "duplicate_of": (same_other[0]["chunk_id"] if same_other else seen_content[fp]),
-                        "reason": "content_hash",
-                    }
+                    {"chunk_id": chunk["chunk_id"], "duplicate_of": dup_of, "reason": "content_hash"}
+                )
+                self.metadata.record_duplicate(
+                    project_id=str(chunk.get("project_id") or ""),
+                    chunk_a=chunk["chunk_id"],
+                    chunk_b=dup_of,
+                    similarity=1.0,
+                    reason="content_hash",
                 )
             seen_content.setdefault(fp, chunk["chunk_id"])
             prepared.append(chunk)
@@ -213,30 +318,32 @@ class KnowledgeStore:
                 updated += 1
             else:
                 added += 1
-            # 先写元数据（含词元索引），再写向量，保证检索时元数据一定已落库
-            self.metadata.upsert_chunk(chunk)
-        kept_ids: List[str] = []
-        kept_rows: List[int] = []
-        for row, chunk in enumerate(prepared):
-            cid = chunk["chunk_id"]
-            if cid in self._pos:
-                self._matrix[self._pos[cid]] = matrix[row]
-            else:
-                kept_ids.append(cid)
-                kept_rows.append(row)
-        if kept_ids:
-            new_block = matrix[kept_rows]
-            self._matrix = (
-                np.vstack([self._matrix, new_block]).astype(np.float32)
-                if self._matrix.size
-                else new_block.astype(np.float32)
-            )
-            start = len(self._ids)
-            self._ids.extend(kept_ids)
-            for offset, cid in enumerate(kept_ids):
-                self._pos[cid] = start + offset
-        self._dirty = True
-        self._save_index()
+        with self._index_lock():
+            self._sync_from_disk()
+            # 元数据（含倒排）在一个事务里落库，再写向量，保证检索时元数据已就绪
+            self.metadata.upsert_chunks_bulk(prepared)
+            kept_ids: List[str] = []
+            kept_rows: List[int] = []
+            for row, chunk in enumerate(prepared):
+                cid = chunk["chunk_id"]
+                if cid in self._pos:
+                    self._matrix[self._pos[cid]] = matrix[row]
+                else:
+                    kept_ids.append(cid)
+                    kept_rows.append(row)
+            if kept_ids:
+                new_block = matrix[kept_rows]
+                self._matrix = (
+                    np.vstack([self._matrix, new_block]).astype(np.float32)
+                    if self._matrix.size
+                    else new_block.astype(np.float32)
+                )
+                start = len(self._ids)
+                self._ids.extend(kept_ids)
+                for offset, cid in enumerate(kept_ids):
+                    self._pos[cid] = start + offset
+            self._dirty = True
+            self._save_index()
         return {
             "added": added,
             "updated": updated,
@@ -256,7 +363,7 @@ class KnowledgeStore:
 
         if replace_existing:
             self._remove_document_vectors(document_id)
-            self.metadata.query("DELETE FROM chunks WHERE document_id=?", (document_id,))
+            self.metadata.execute_write("DELETE FROM chunks WHERE document_id=?", (document_id,))
         payload = []
         for raw in chunks:
             chunk = dict(raw)
@@ -832,6 +939,42 @@ def _index_text(chunk: Mapping[str, Any]) -> str:
     content = str(chunk.get("content") or "")
     # 标题权重更高：重复 2 次
     return f"{title}\n{title}\n{summary}\n{content}"
+
+
+def _content_changed(existing: Mapping[str, Any], raw: Mapping[str, Any]) -> bool:
+    """调用方是否给出了实质不同的内容（标题/标签变化不算）。"""
+
+    if "content" not in raw:
+        return False
+    new_content = raw.get("content")
+    if new_content is None:
+        return False
+    return normalize_text(str(new_content)) != normalize_text(str(existing.get("content") or ""))
+
+
+def _merge_existing(existing: Mapping[str, Any], raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """把"更新"请求合并到已有片段上。
+
+    只接受调用方显式给出的字段；受保护的状态字段直接丢弃（必须走状态机）。
+    """
+
+    allowed = set(existing.keys())
+    merged: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in allowed or key in {"chunk_id", "project_id", "created_at"}:
+            continue
+        if key in STATE_FIELDS:
+            continue
+        if value is None:
+            continue
+        merged[key] = value
+    # 身份列与创建时间必须带回去，否则 INSERT 分支会撞 NOT NULL，
+    # 或者把 created_at 改成"现在"。
+    merged["chunk_id"] = existing["chunk_id"]
+    merged["project_id"] = existing["project_id"]
+    merged["created_at"] = existing.get("created_at") or utcnow_iso()
+    merged["updated_at"] = utcnow_iso()
+    return merged
 
 
 def _coerce_chunk(raw: Mapping[str, Any]) -> Dict[str, Any]:
