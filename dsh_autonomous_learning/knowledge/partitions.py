@@ -3,19 +3,24 @@
 第一阶段：**一个**向量索引 + ``partition`` 元数据字段实现逻辑分区，
 不绑定任何具体数据库集合名，将来可平滑迁移到物理分区。
 
+v1.2 起分区**不再硬编码在核心层**：分区由 ``domains`` 注册表里的
+:class:`~dsh_autonomous_learning.domains.DomainSpec` 声明，核心只面对
+``PartitionSpec`` 视图。新增领域（= 新分区）只需要 ``register_domain()``。
+
 分区规则：
 - 每条知识必须属于且仅属于一个分区；
-- 项目分区（project_knowledge）默认只在所属项目的检索中可见；
+- 项目分区与实验分区默认只在所属项目的检索中可见；
 - 跨领域引用通过知识关系（edges）表达，**不合并**两条相似知识；
 - 待审区（pending_knowledge）是默认落地区，核验通过后才考虑迁出。
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional
 
-from ..core.models import Partition
+from ..domains import PENDING_PARTITION, REGISTRY, DomainSpec
 
 
 @dataclass(frozen=True)
@@ -24,72 +29,63 @@ class PartitionSpec:
     label: str
     description: str
     default_domain: str
-    keywords: Sequence[str]
+    keywords: tuple = ()
     allow_auto_write: bool = True  # auto 模式下是否允许自动写入
 
 
-PARTITION_SPECS: Dict[str, PartitionSpec] = {
-    Partition.GENERAL.value: PartitionSpec(
-        key=Partition.GENERAL.value,
-        label="通用知识",
-        description="数学、逻辑、基础理论与跨领域通用概念",
-        default_domain="general",
-        keywords=("数学", "逻辑", "统计", "概率", "算法", "math", "logic", "probability"),
-    ),
-    Partition.UIUX.value: PartitionSpec(
-        key=Partition.UIUX.value,
-        label="UI/UX 设计",
-        description="视觉设计、交互设计、设计规范、可用性与无障碍",
-        default_domain="uiux",
-        keywords=("ui", "ux", "设计", "交互", "可用性", "无障碍", "material", "figma", "视觉"),
-    ),
-    Partition.FINANCE.value: PartitionSpec(
-        key=Partition.FINANCE.value,
-        label="金融知识",
-        description="金融基础、外汇、CFD、加密货币与风险管理",
-        default_domain="finance",
-        keywords=("金融", "外汇", "利率", "通胀", "cfd", "加密货币", "风控", "杠杆", "保证金"),
-    ),
-    Partition.QUANT.value: PartitionSpec(
-        key=Partition.QUANT.value,
-        label="量化交易",
-        description="策略、指标、回测、样本外测试与鲁棒性",
-        default_domain="quant",
-        keywords=("量化", "回测", "夏普", "滑点", "样本外", "策略", "指标", "过拟合", "backtest"),
-    ),
-    Partition.PROGRAMMING.value: PartitionSpec(
-        key=Partition.PROGRAMMING.value,
-        label="编程知识",
-        description="Python / Rust / Kotlin / TypeScript 等语言与工程实践",
-        default_domain="programming",
-        keywords=("python", "rust", "kotlin", "typescript", "函数", "接口", "编译", "代码", "api"),
-    ),
-    Partition.PROJECT.value: PartitionSpec(
-        key=Partition.PROJECT.value,
-        label="项目知识",
-        description="特定项目的架构、接口、决策记录与技术文档（默认项目内可见）",
-        default_domain="project",
-        keywords=("本项目", "架构", "接口", "决策", "adr", "模块", "部署"),
-    ),
-    Partition.EXPERIMENT.value: PartitionSpec(
-        key=Partition.EXPERIMENT.value,
-        label="实验知识",
-        description="实验记录、测试结果、失败案例与性能数据",
-        default_domain="experiment",
-        keywords=("实验", "测试结果", "benchmark", "复现", "失败案例", "性能"),
-    ),
-    Partition.PENDING.value: PartitionSpec(
-        key=Partition.PENDING.value,
-        label="待审知识",
-        description="尚未核验、等待审核或需要进一步处理的知识（默认落地区）",
-        default_domain="general",
-        keywords=(),
-        allow_auto_write=True,
-    ),
-}
+def _to_partition_spec(spec: DomainSpec) -> PartitionSpec:
+    return PartitionSpec(
+        key=spec.partition,
+        label=spec.label,
+        description=spec.description,
+        default_domain=spec.key,
+        keywords=tuple(spec.keywords),
+        allow_auto_write=spec.allow_auto_write,
+    )
 
-#: 项目可见性：这些分区默认只在所属项目内可见
-PROJECT_SCOPED_PARTITIONS = {Partition.PROJECT.value, Partition.EXPERIMENT.value, Partition.PENDING.value}
+
+_PENDING_SPEC = PartitionSpec(
+    key=PENDING_PARTITION,
+    label="待审知识",
+    description="尚未核验、等待审核或需要进一步处理的知识（默认落地区）",
+    default_domain="general",
+    keywords=(),
+    allow_auto_write=True,
+)
+
+
+class _PartitionSpecView(Mapping[str, PartitionSpec]):
+    """分区视图：每次访问都按当前注册表重建，因此注册新领域立刻生效。"""
+
+    def _build(self) -> Dict[str, PartitionSpec]:
+        view = {spec.partition: _to_partition_spec(spec) for spec in REGISTRY.all()}
+        view.setdefault(PENDING_PARTITION, _PENDING_SPEC)
+        return view
+
+    def __getitem__(self, key: str) -> PartitionSpec:
+        return self._build()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._build())
+
+    def __len__(self) -> int:
+        return len(self._build())
+
+
+#: 分区声明视图（不再是硬编码字典）
+PARTITION_SPECS: Mapping[str, PartitionSpec] = _PartitionSpecView()
+
+
+def project_scoped_partitions() -> set:
+    """默认只在所属项目内可见的分区（随注册表变化）。"""
+
+    scoped = {spec.partition for spec in REGISTRY.all() if spec.project_scoped}
+    scoped.add(PENDING_PARTITION)
+    return scoped
+
+
+#: 兼容常量（内置领域的快照；判断请优先用 project_scoped_partitions()）
+PROJECT_SCOPED_PARTITIONS = project_scoped_partitions()
 
 
 def all_partitions() -> List[str]:
@@ -97,35 +93,26 @@ def all_partitions() -> List[str]:
 
 
 def get_spec(partition: str) -> PartitionSpec:
-    if partition not in PARTITION_SPECS:
-        raise ValueError(
-            f"未知知识分区: {partition}，允许值: {', '.join(all_partitions())}"
-        )
-    return PARTITION_SPECS[partition]
+    specs = PARTITION_SPECS
+    if partition not in specs:
+        raise ValueError(f"未知知识分区: {partition}，允许值: {', '.join(all_partitions())}")
+    return specs[partition]
 
 
 def partition_for_domain(domain: str) -> str:
-    mapping = {
-        "general": Partition.GENERAL.value,
-        "uiux": Partition.UIUX.value,
-        "ui/ux": Partition.UIUX.value,
-        "finance": Partition.FINANCE.value,
-        "quant": Partition.QUANT.value,
-        "programming": Partition.PROGRAMMING.value,
-        "project": Partition.PROJECT.value,
-        "experiment": Partition.EXPERIMENT.value,
-    }
-    return mapping.get((domain or "").lower(), Partition.GENERAL.value)
+    """领域 → 分区。未知领域回落到 general（由注册表决定，不再写死映射）。"""
+
+    return REGISTRY.partition_of(domain)
 
 
 def default_visibility(partition: str) -> str:
-    return "project" if partition in PROJECT_SCOPED_PARTITIONS else "global"
+    return "project" if partition in project_scoped_partitions() else "global"
 
 
 def project_partitions(domain: str) -> List[str]:
     """项目默认允许写入的分区：待审区 + 领域分区。"""
 
-    allowed = [Partition.PENDING.value]
+    allowed = [PENDING_PARTITION]
     mapped = partition_for_domain(domain)
     if mapped not in allowed:
         allowed.append(mapped)
@@ -147,13 +134,14 @@ def ensure_partition_allowed(project: Optional[dict], partition: str) -> None:
 
 
 def describe_partitions() -> List[Dict[str, object]]:
+    scoped = project_scoped_partitions()
     return [
         {
             "partition": spec.key,
             "label": spec.label,
             "description": spec.description,
             "default_domain": spec.default_domain,
-            "project_scoped": spec.key in PROJECT_SCOPED_PARTITIONS,
+            "project_scoped": spec.key in scoped,
             "auto_write": spec.allow_auto_write,
         }
         for spec in PARTITION_SPECS.values()
@@ -171,4 +159,5 @@ __all__ = [
     "get_spec",
     "partition_for_domain",
     "project_partitions",
+    "project_scoped_partitions",
 ]

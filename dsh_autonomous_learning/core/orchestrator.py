@@ -1092,6 +1092,16 @@ class LearningOrchestrator:
                     "level": LearningLevel.L2.value,
                     "visibility": default_visibility(partition),
                     "license_status": license_status or "unknown",
+                    # 结构化知识字段（工具可显式提供；缺省不伪造）
+                    "tags": list(item.get("tags") or []),
+                    "source_version": str(item.get("source_version") or ""),
+                    "source_excerpt": str(item.get("source_excerpt") or content[:300]),
+                    "core_principle": str(item.get("core_principle") or ""),
+                    "reasoning": str(item.get("reasoning") or ""),
+                    "application": str(item.get("application") or ""),
+                    "implementation": str(item.get("implementation") or ""),
+                    "anti_patterns": str(item.get("anti_patterns") or ""),
+                    "limitations": str(item.get("limitations") or ""),
                     "metadata": item.get("metadata") or {"extraction_method": "tool"},
                 }
             )

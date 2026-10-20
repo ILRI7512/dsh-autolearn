@@ -128,11 +128,14 @@ class KnowledgeType(StrEnum):
 
 
 class Partition(StrEnum):
+    """基础设施分区（兼容层）。
+
+    具体知识领域的**分区不再写死在这里**：它们由 ``domains`` 注册表声明，
+    通过 ``knowledge.partitions.partition_for_domain()`` 取得。保留这几个常量
+    只是为了让"待审区 / 项目区 / 实验区 / 通用区"这些非领域分区有稳定名字。
+    """
+
     GENERAL = "general_knowledge"
-    UIUX = "uiux_knowledge"
-    FINANCE = "finance_knowledge"
-    QUANT = "quant_knowledge"
-    PROGRAMMING = "programming_knowledge"
     PROJECT = "project_knowledge"
     EXPERIMENT = "experiment_knowledge"
     PENDING = "pending_knowledge"
@@ -423,6 +426,15 @@ class Chunk:
     verification_evidence: List[Dict[str, Any]] = field(default_factory=list)
     freshness_status: str = FreshnessStatus.UNKNOWN.value
     conflict_status: str = "none"  # none | potential | confirmed
+    #: 结构化知识字段（审计 K 组：这 8 项以前在 schema 层就缺失）
+    tags: List[str] = field(default_factory=list)
+    source_version: str = ""
+    source_excerpt: str = ""
+    core_principle: str = ""
+    reasoning: str = ""
+    application: str = ""
+    implementation: str = ""
+    anti_patterns: str = ""
     limitations: str = ""
     license_status: str = LicenseStatus.UNKNOWN.value
     visibility: str = "project"  # project | global

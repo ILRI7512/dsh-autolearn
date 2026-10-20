@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from ..domains import domain_keys
 from ..core.models import TaskStatus
 from ..core.orchestrator import LearningOrchestrator, Runtime
 from .registry import ToolError, ToolRegistry, ToolSpec
@@ -13,7 +14,7 @@ PROJECT_PROPS = {
     "title": {"type": "string", "description": "项目标题，省略时取目标前 40 字"},
     "domain": {
         "type": "string",
-        "enum": ["general", "uiux", "finance", "quant", "programming", "project", "experiment"],
+        "enum": domain_keys(),
         "description": "领域，决定默认主题模板与分区",
     },
     "depth": {"type": "string", "enum": ["overview", "working", "deep"], "description": "学习深度"},
@@ -27,6 +28,9 @@ PROJECT_PROPS = {
 
 
 def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None:
+    # 领域枚举按注册表实时刷新：PROJECT_PROPS 是模块级常量，
+    # 若不在每次注册时刷新，后注册的领域就不会出现在工具 schema 里。
+    PROJECT_PROPS["domain"]["enum"] = domain_keys()
     # ------------------------------------------------------------------ #
     # 项目管理
     # ------------------------------------------------------------------ #
@@ -188,7 +192,7 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
                 "type": "object",
                 "properties": {
                     "goal": {"type": "string"},
-                    "domain": {"type": "string", "enum": ["general", "uiux", "finance", "quant", "programming", "project", "experiment"]},
+                    "domain": {"type": "string", "enum": domain_keys()},
                     "depth": {"type": "string", "enum": ["overview", "working", "deep"]},
                     "use_model": {"type": "boolean"},
                 },

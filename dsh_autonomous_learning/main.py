@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .domains import domain_keys
 from .config import load_config
 from .core.models import utcnow_iso
 from .core.orchestrator import build_runtime
@@ -311,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("project-create", help="创建学习项目")
     p.add_argument("--goal", required=True)
     p.add_argument("--title", default="")
-    p.add_argument("--domain", default="general", choices=["general", "uiux", "finance", "quant", "programming", "project", "experiment"])
+    p.add_argument("--domain", default="general", choices=domain_keys())
     p.add_argument("--depth", default="working", choices=["overview", "working", "deep"])
     p.add_argument("--source", action="append", help="允许的数据源（可多次）")
     p.add_argument("--plan", action="store_true", help="立即生成计划")

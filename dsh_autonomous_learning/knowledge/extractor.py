@@ -94,10 +94,47 @@ class KnowledgeDraft:
     freshness_status: str = FreshnessStatus.UNKNOWN.value
     license_status: str = LicenseStatus.UNKNOWN.value
     visibility: str = "global"
+    tags: List[str] = field(default_factory=list)
+    source_version: str = ""
+    source_excerpt: str = ""
+    core_principle: str = ""
+    reasoning: str = ""
+    application: str = ""
+    implementation: str = ""
+    anti_patterns: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_row(self) -> Dict[str, Any]:
         return dict(self.__dict__)
+
+
+def _derive_tags(
+    text: str,
+    concepts: Sequence[Mapping[str, Any]],
+    formulas: Sequence[Mapping[str, Any]],
+    codes: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """从抽取结果里推导标签：概念名 + 结构化类型标记 + 少量关键词。"""
+
+    tags: List[str] = []
+    for item in list(concepts)[:6]:
+        name = str((item or {}).get("term") or "").strip()
+        if name and len(name) <= 24:
+            tags.append(name)
+    if formulas:
+        tags.append("含公式")
+    if codes:
+        tags.append("含代码")
+    for keyword in ("滑点", "回测", "夏普", "对比度", "无障碍", "杠杆", "保证金"):
+        if keyword in text:
+            tags.append(keyword)
+    seen = set()
+    unique = []
+    for tag in tags:
+        if tag not in seen:
+            seen.add(tag)
+            unique.append(tag)
+    return unique[:10]
 
 
 def extract_formulas(text: str) -> List[Dict[str, str]]:
@@ -341,6 +378,12 @@ class KnowledgeExtractor:
             freshness_status=str(document.get("freshness_status") or FreshnessStatus.UNKNOWN.value),
             license_status=str(document.get("license_status") or LicenseStatus.UNKNOWN.value),
             visibility=default_visibility(Partition.PENDING.value),
+            # 规则路径能确定的结构化字段：标签、原文摘录、版本标识。
+            # core_principle / reasoning / application / implementation /
+            # anti_patterns 需要模型或实践环节才能填，这里保持空值（不伪造）。
+            tags=_derive_tags(chunk, concepts, formulas, codes),
+            source_version=str(document.get("source_version") or document.get("parser") or ""),
+            source_excerpt=chunk[:300],
             metadata=metadata,
         )
 
