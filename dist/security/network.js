@@ -9,40 +9,112 @@
  * 4. 默认拒绝私有/环回/链路本地/保留地址，含云元数据 169.254.169.254。
  */
 import { lookup as dnsLookup } from 'node:dns';
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { AutolearnError, ERROR_CODES } from "../core/errors.js";
 const ALLOWED_PORTS = new Set([80, 443, 8080, 8443]);
 const USER_AGENT = 'DSH-Autonomous-Learning/2.0 (+local research agent)';
+/**
+ * 不复用连接：抓取是低频操作，keep-alive 只会带来“服务器关闭后复用死 socket”
+ * 的偶发 socket hang up（vNext 审计 D-05 的实际表现）。
+ */
+const HTTP_AGENT = new HttpAgent({ keepAlive: false });
+const HTTPS_AGENT = new HttpsAgent({ keepAlive: false });
 function networkError(message, details = {}) {
     return new AutolearnError(message, { code: ERROR_CODES.NETWORK_DENIED, details });
 }
 /** 判断 IP 是否公网可访问（IPv4 + IPv6，含 IPv4-mapped 解映射）。 */
+/** 把 IPv6 文本展开成 8 个 16 位分组；非法返回 null。支持 :: 与 IPv4 尾部。 */
+function parseIPv6(input) {
+    let address = input.trim().toLowerCase();
+    const zone = address.indexOf('%');
+    if (zone >= 0)
+        address = address.slice(0, zone);
+    const parseGroups = (part) => {
+        if (!part)
+            return [];
+        const out = [];
+        for (const item of part.split(':')) {
+            if (item.includes('.')) {
+                if (isIP(item) !== 4)
+                    return null;
+                const octets = item.split('.').map((value) => Number.parseInt(value, 10));
+                if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255))
+                    return null;
+                out.push((octets[0] << 8) | octets[1]);
+                out.push((octets[2] << 8) | octets[3]);
+                continue;
+            }
+            if (!/^[0-9a-f]{1,4}$/.test(item))
+                return null;
+            out.push(Number.parseInt(item, 16));
+        }
+        return out;
+    };
+    const doubleColon = address.indexOf('::');
+    if (doubleColon >= 0) {
+        if (address.indexOf('::', doubleColon + 1) >= 0)
+            return null;
+        const left = parseGroups(address.slice(0, doubleColon));
+        const right = parseGroups(address.slice(doubleColon + 2));
+        if (!left || !right)
+            return null;
+        if (left.length + right.length > 8)
+            return null;
+        return [...left, ...new Array(8 - left.length - right.length).fill(0), ...right];
+    }
+    const groups = parseGroups(address);
+    return groups && groups.length === 8 ? groups : null;
+}
+function ipv4FromGroups(high, low) {
+    return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+}
+function isPublicIPv6(address) {
+    const groups = parseIPv6(address);
+    if (!groups)
+        return false;
+    const g = groups;
+    const isZero = g.every((value) => value === 0);
+    if (isZero)
+        return false;
+    if (g.slice(0, 7).every((value) => value === 0) && g[7] === 1)
+        return false; // ::1 任意写法
+    if ((g[0] & 0xfe00) === 0xfc00)
+        return false; // fc00::/7 ULA
+    if ((g[0] & 0xffc0) === 0xfe80)
+        return false; // fe80::/10 link-local
+    if ((g[0] & 0xffc0) === 0xfec0)
+        return false; // fec0::/10 site-local（已废弃）
+    if ((g[0] & 0xff00) === 0xff00)
+        return false; // ff00::/8 multicast
+    if (g[0] === 0x2001 && g[1] === 0x0db8)
+        return false; // 2001:db8::/32 documentation
+    if (g[0] === 0x2001 && g[1] === 0x0000)
+        return false; // 2001::/32 Teredo（可隧道私网）
+    if (g[0] === 0x2002)
+        return isPublicIPv4(ipv4FromGroups(g[1], g[2])); // 6to4
+    // IPv4-mapped ::ffff:0:0/96（十进制与十六进制写法）
+    if (g.slice(0, 5).every((value) => value === 0) && g[5] === 0xffff) {
+        return isPublicIPv4(ipv4FromGroups(g[6], g[7]));
+    }
+    // IPv4-compatible ::/96（已废弃，但对 SSRF 仍有效）
+    if (g.slice(0, 6).every((value) => value === 0)) {
+        return isPublicIPv4(ipv4FromGroups(g[6], g[7]));
+    }
+    // NAT64 64:ff9b::/96
+    if (g[0] === 0x0064 && g[1] === 0xff9b && g.slice(2, 6).every((value) => value === 0)) {
+        return isPublicIPv4(ipv4FromGroups(g[6], g[7]));
+    }
+    return true;
+}
 export function isPublicAddress(input) {
     const address = input.trim().toLowerCase().replace(/^\[|\]$/g, '');
     const version = isIP(address);
     if (version === 4)
         return isPublicIPv4(address);
-    if (version === 6) {
-        // IPv4-mapped: ::ffff:127.0.0.1
-        const mapped = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-        if (mapped?.[1])
-            return isPublicIPv4(mapped[1]);
-        if (address === '::' || address === '::1')
-            return false;
-        if (/^f[cd][0-9a-f]{2}:/.test(address))
-            return false; // fc00::/7
-        if (/^fe[89ab][0-9a-f]:/.test(address))
-            return false; // fe80::/10
-        if (/^ff[0-9a-f]{2}:/.test(address))
-            return false; // ff00::/8
-        if (address.startsWith('2001:db8:'))
-            return false; // documentation
-        if (address.startsWith('64:ff9b::'))
-            return false; // NAT64 可映射私网
-        return true;
-    }
+    if (version === 6)
+        return isPublicIPv6(address);
     return false;
 }
 function isPublicIPv4(address) {
@@ -155,6 +227,16 @@ function contentTypeAllowed(contentType, allowed) {
 /** 单跳请求：DNS 结果被钉死为 lookup，连接地址与校验地址一致。 */
 function requestOnce(target, options, headers, timeoutMs) {
     return new Promise((resolve, reject) => {
+        let settled = false;
+        let deadline = null;
+        const finish = (action) => {
+            if (settled)
+                return;
+            settled = true;
+            if (deadline)
+                clearTimeout(deadline);
+            action();
+        };
         const isHttps = target.url.protocol === 'https:';
         const request = isHttps ? httpsRequest : httpRequest;
         const req = request({
@@ -168,6 +250,7 @@ function requestOnce(target, options, headers, timeoutMs) {
                 accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.5',
                 ...headers,
             },
+            agent: isHttps ? HTTPS_AGENT : HTTP_AGENT,
             servername: isHttps && !isIP(target.hostname) ? target.hostname : undefined,
             lookup: (_hostname, _opts, callback) => {
                 // 固定为已校验地址，防止 DNS rebinding 换到内网。
@@ -176,13 +259,11 @@ function requestOnce(target, options, headers, timeoutMs) {
         }, (response) => {
             const chunks = [];
             let total = 0;
-            let finished = false;
             const fail = (error) => {
-                if (finished)
-                    return;
-                finished = true;
-                response.destroy();
-                reject(error);
+                finish(() => {
+                    response.destroy();
+                    reject(error);
+                });
             };
             response.on('data', (chunk) => {
                 total += chunk.length;
@@ -193,23 +274,36 @@ function requestOnce(target, options, headers, timeoutMs) {
                 chunks.push(chunk);
             });
             response.on('end', () => {
-                if (finished)
-                    return;
-                finished = true;
-                resolve({
-                    status: response.statusCode ?? 0,
-                    headers: response.headers,
-                    body: Buffer.concat(chunks),
-                    bytes: total,
+                finish(() => {
+                    resolve({
+                        status: response.statusCode ?? 0,
+                        headers: response.headers,
+                        body: Buffer.concat(chunks),
+                        bytes: total,
+                    });
                 });
             });
             response.on('error', fail);
         });
+        const timeoutError = () => networkError(`请求超时（>${timeoutMs}ms）`);
+        // req.setTimeout 只覆盖 socket 空闲；再加一个总 deadline，
+        // 保证“响应头已到但 body 永远不结束”的情况也会超时。
+        deadline = setTimeout(() => {
+            finish(() => {
+                req.destroy();
+                reject(timeoutError());
+            });
+        }, timeoutMs);
+        if (typeof deadline.unref === 'function')
+            deadline.unref();
         req.setTimeout(timeoutMs, () => {
-            req.destroy(networkError(`请求超时（>${timeoutMs}ms）`));
+            finish(() => {
+                req.destroy();
+                reject(timeoutError());
+            });
         });
         req.on('error', (error) => {
-            reject(error instanceof AutolearnError ? error : networkError(`请求失败: ${error.message}`));
+            finish(() => reject(error instanceof AutolearnError ? error : networkError(`请求失败: ${error.message}`)));
         });
         req.end();
     });

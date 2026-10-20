@@ -39,7 +39,7 @@ export class PermissionManager {
   private readonly pathPolicy: PathPolicy
   private readonly approvals: ApprovalService | null
   private readonly audit: AuditLogger
-  private readonly delegateDefault: boolean
+  private delegateDefault: boolean
 
   constructor(options: {
     security: SecurityConfig
@@ -62,6 +62,14 @@ export class PermissionManager {
 
   get mode(): AutonomyMode {
     return this.currentMode
+  }
+
+  /**
+   * 宿主审批是否**真的**已挂载。
+   * 只允许在成功注册 tools/pre-execute hook 之后调用；否则 destructive 会绕过确认。
+   */
+  setDelegateToHost(active: boolean): void {
+    this.delegateDefault = active
   }
 
   setMode(mode: string): AutonomyMode {

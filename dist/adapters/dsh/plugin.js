@@ -46,9 +46,12 @@ export function apply(ctx, config = {}) {
         console.warn('[dsh-autolearn] ctx.tools 不可用：原生工具未注册');
         return;
     }
+    const canHook = typeof ctx.on === 'function';
     let engine;
     try {
-        engine = AutolearnEngine.open({ home: resolveEngineHome(config), hostApproval: true, telemetry });
+        // 先以「未委托」打开；只有 hook 注册成功后才启用宿主审批，
+        // 避免宿主没有审批能力时 destructive 被静默放行。
+        engine = AutolearnEngine.open({ home: resolveEngineHome(config), hostApproval: false, telemetry });
     }
     catch (error) {
         // 启动失败必须显式暴露，不能静默降级成"没有工具"。
@@ -75,22 +78,30 @@ export function apply(ctx, config = {}) {
             }
         }
         let offHook;
-        if (typeof ctx.on === 'function') {
-            offHook = ctx.on('tools/pre-execute', (...raw) => {
-                const exec = raw[0];
-                const next = raw[1];
-                try {
-                    if (exec?.name && needsApproval(exec.name, exec.args ?? {})) {
-                        return { kind: 'ask', reason: approvalReason(exec.name, exec.args ?? {}) };
+        if (canHook) {
+            try {
+                offHook = ctx.on?.('tools/pre-execute', (...raw) => {
+                    const exec = raw[0];
+                    const next = raw[1];
+                    try {
+                        if (exec?.name && needsApproval(exec.name, exec.args ?? {})) {
+                            return { kind: 'ask', reason: approvalReason(exec.name, exec.args ?? {}) };
+                        }
+                        return typeof next === 'function' ? next() : undefined;
                     }
-                    return typeof next === 'function' ? next() : undefined;
-                }
-                catch (error) {
-                    // 失败关闭：审批判定异常时仍然 ask，绝不自动放行。
-                    console.warn(`[dsh-autolearn] 审批判定异常，按失败关闭: ${error instanceof Error ? error.message : String(error)}`);
-                    return { kind: 'ask', reason: '自主学习插件的审批判定异常，已按失败关闭处理；请确认后再执行。' };
-                }
-            });
+                    catch (error) {
+                        // 失败关闭：审批判定异常时仍然 ask，绝不自动放行。
+                        console.warn(`[dsh-autolearn] 审批判定异常，按失败关闭: ${error instanceof Error ? error.message : String(error)}`);
+                        return { kind: 'ask', reason: '自主学习插件的审批判定异常，已按失败关闭处理；请确认后再执行。' };
+                    }
+                });
+                // 只有 hook 真正挂上之后才允许 engine 委托宿主审批。
+                engine.enableHostApproval();
+            }
+            catch (error) {
+                console.warn(`[dsh-autolearn] 审批 hook 注册失败，destructive 仍需要本地确认: ${error instanceof Error ? error.message : String(error)}`);
+                offHook = undefined;
+            }
         }
         console.log(`[dsh-autolearn] 原生工具已注册: ${tools.length} 个（${tools.map((tool) => tool.name).join(', ')}）`);
         return () => {

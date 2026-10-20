@@ -294,7 +294,8 @@ export class KnowledgeVerifier {
     const seen = new Set(evidence.map((item) => item.source_id || item.url))
     for (const pair of similar) {
       if (evidence.length >= 6) break
-      const row = this.store.getChunk(pair.chunk_b)
+      const otherId = pair.chunk_a === chunk.chunk_id ? pair.chunk_b : pair.chunk_a
+      const row = this.store.getChunk(otherId)
       if (!row) continue
       const key = row.source_id || row.source_url
       if (!key || seen.has(key)) continue

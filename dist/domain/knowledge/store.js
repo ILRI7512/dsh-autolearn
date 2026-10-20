@@ -18,7 +18,6 @@ import { KnowledgeStatus } from "../../core/types.js";
 import { SCHEMA_VERSION } from "../../infrastructure/database/schema.js";
 import { bm25Search } from "../../infrastructure/retrieval/bm25.js";
 import { termFrequencies, tokenize } from "../../infrastructure/retrieval/tokenizer.js";
-import { indexText } from "../../infrastructure/embeddings/vector-index.js";
 const PROTECTED_UPDATE_FIELDS = new Set([
     'chunk_id', 'project_id', 'content_hash', 'status', 'level', 'verification_status',
     'verification_method', 'verification_evidence', 'confidence', 'evidence_count',
@@ -216,7 +215,9 @@ export class KnowledgeStore {
             const merged = this.db.get('chunks', chunkId);
             this.reindexChunk(merged);
         });
-        if (contentChanged || 'metadata' in clean || 'tags' in clean) {
+        // 向量索引文本包含 title/summary（标题重复 2 次），它们变化时也必须刷新向量，
+        // 否则 vector 通道会继续命中旧标题（vNext 审计 D-02）。
+        if (contentChanged || 'metadata' in clean || 'tags' in clean || 'title' in clean || 'summary' in clean) {
             const updated = this.getChunk(chunkId);
             try {
                 this.index.upsertChunks(this.db, [updated]);
@@ -420,6 +421,9 @@ export class KnowledgeStore {
                 continue;
             results.push(this.formatResult(chunk, item.score, options.includeContent ?? true));
         }
+        // 之前的实现只把时效/置信度写进 score 字段，却仍按融合顺序返回，
+        // 等于“算了排序分但没用它”（vNext 审计 D-04）。这里按最终分重排。
+        results.sort((a, b) => b.score - a.score || a.chunk_id.localeCompare(b.chunk_id));
         return {
             query, mode, results, warnings, gap: results.length === 0,
             elapsed_ms: Date.now() - started, filters: filter,
@@ -460,7 +464,14 @@ export class KnowledgeStore {
         if (['unknown', 'restricted'].includes(chunk.license_status)) {
             warnings.push(`许可状态: ${chunk.license_status}，转载或商用前需确认`);
         }
-        const adjusted = score * (0.85 + 0.15 * Number(chunk.confidence ?? 0));
+        // 时效只做**排序微调**，不隐藏结果：过期/过时知识仍然返回并带 warning，
+        // 但在分数接近时让当前版本优先（vNext 审计 D-03：stale 曾排在 current 之前）。
+        const freshnessFactor = {
+            fresh: 1, aging: 0.97, unknown: 0.95, stale: 0.7, expired: 0.4,
+        };
+        const adjusted = score
+            * (0.85 + 0.15 * Number(chunk.confidence ?? 0))
+            * (freshnessFactor[chunk.freshness_status] ?? 0.95);
         return {
             chunk_id: chunk.chunk_id,
             title: chunk.title,
@@ -508,25 +519,35 @@ export class KnowledgeStore {
     // ------------------------------------------------------------------ //
     findDuplicates(options = {}) {
         const threshold = Number(options.threshold ?? this.retrieval.dedupe_similarity);
-        const maxPairs = Math.min(Number(options.maxPairs ?? 200), 1000);
-        const filter = options.filter ?? {};
-        const ids = options.chunkId ? [options.chunkId] : this.listChunkIds(filter);
-        if (ids.length === 0)
+        const maxPairs = Math.max(1, Math.min(Number(options.maxPairs ?? 200), 1000));
+        let filter = options.filter ?? {};
+        if (options.chunkId) {
+            const chunk = this.getChunk(options.chunkId);
+            if (!chunk)
+                return [];
+            if (!filter.projectId)
+                filter = { ...filter, projectId: chunk.project_id };
+        }
+        const ids = this.listChunkIds({ ...filter, includeInvalidated: false });
+        if (options.chunkId && !ids.includes(options.chunkId))
+            ids.push(options.chunkId);
+        if (ids.length < 2)
             return [];
+        const allowed = new Set(ids);
         const pairs = [];
         const seen = new Set();
-        // 精确重复：内容指纹相同（候选集合内两两成对）
-        const hashOf = new Map();
-        for (const row of this.getChunks(ids))
-            hashOf.set(row.chunk_id, row.content_hash);
+        // 精确重复：一次 SQL 查询取指纹，按 project+hash 分组（不再把所有整行读进内存）
+        const { where, params } = this.buildFilter({ ...filter, includeInvalidated: false });
+        const hashClause = where ? `${where} AND content_hash <> ''` : " WHERE content_hash <> ''";
+        const hashRows = this.db.query(`SELECT chunk_id, project_id, content_hash FROM chunks${hashClause}`, params);
         const byHash = new Map();
-        for (const id of ids) {
-            const hash = hashOf.get(id) ?? '';
-            if (!hash)
+        for (const row of hashRows) {
+            if (!allowed.has(row.chunk_id))
                 continue;
-            const list = byHash.get(hash) ?? [];
-            list.push(id);
-            byHash.set(hash, list);
+            const key = `${row.project_id}|${row.content_hash}`;
+            const list = byHash.get(key) ?? [];
+            list.push(row.chunk_id);
+            byHash.set(key, list);
         }
         for (const members of byHash.values()) {
             if (members.length < 2)
@@ -536,6 +557,8 @@ export class KnowledgeStore {
                 for (let j = i + 1; j < sorted.length; j += 1) {
                     const a = sorted[i];
                     const b = sorted[j];
+                    if (options.chunkId && a !== options.chunkId && b !== options.chunkId)
+                        continue;
                     const key = [a, b].sort().join('|');
                     if (seen.has(key))
                         continue;
@@ -546,30 +569,25 @@ export class KnowledgeStore {
                 }
             }
         }
-        // 近似重复：向量余弦
-        for (const id of ids) {
-            const neighbors = this.index.search(this.indexTextFor(id) || '', ids, 6);
-            for (const hit of neighbors) {
-                if (hit.chunkId === id || hit.score < threshold)
-                    continue;
-                const key = [id, hit.chunkId].sort().join('|');
-                if (seen.has(key))
-                    continue;
-                seen.add(key);
-                pairs.push({
-                    chunk_a: id, chunk_b: hit.chunkId,
-                    similarity: Math.round(hit.score * 10000) / 10000,
-                    reason: 'vector_similarity',
-                });
-                if (pairs.length >= maxPairs)
-                    return pairs;
-            }
+        // 近似重复：复用索引矩阵批量点积；chunkId 模式只返回与该片段相关的对
+        const near = this.index.similarPairs(ids, threshold, maxPairs, options.chunkId ? [options.chunkId] : undefined);
+        for (const pair of near) {
+            if (options.chunkId && pair.a !== options.chunkId && pair.b !== options.chunkId)
+                continue;
+            const key = [pair.a, pair.b].sort().join('|');
+            if (seen.has(key))
+                continue;
+            seen.add(key);
+            pairs.push({
+                chunk_a: pair.a,
+                chunk_b: pair.b,
+                similarity: Math.round(pair.score * 10000) / 10000,
+                reason: 'vector_similarity',
+            });
+            if (pairs.length >= maxPairs)
+                return pairs;
         }
         return pairs;
-    }
-    indexTextFor(chunkId) {
-        const chunk = this.getChunk(chunkId);
-        return chunk ? indexText(chunk) : '';
     }
     // ------------------------------------------------------------------ //
     // 核验记录与版本

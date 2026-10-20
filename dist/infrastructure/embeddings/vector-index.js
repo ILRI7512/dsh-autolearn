@@ -316,6 +316,71 @@ export class VectorIndex {
         hits.sort((a, b) => b.score - a.score);
         return hits.slice(0, topK);
     }
+    /**
+     * 批量余弦相似对（阈值过滤、最多 maxPairs）。
+     *
+     * 旧实现（store.findDuplicates）对每个 chunk 都做一次“embedding 全库查询”，
+     * 800 条时约 4.2s（实测）；这里直接复用内存矩阵做块内点积，
+     * 避免 N 次向量化和 N 次 statSync。onlyIds 用于“只找与这些 id 相关的对”。
+     */
+    similarPairs(allowedIds, threshold, maxPairs = 200, onlyIds) {
+        this.syncFromDisk();
+        if (this.lastError || this.ids.length === 0)
+            return [];
+        const allowedRows = [];
+        for (const id of allowedIds) {
+            const row = this.pos.get(id);
+            if (row !== undefined)
+                allowedRows.push(row);
+        }
+        if (allowedRows.length < (onlyIds && onlyIds.length > 0 ? 1 : 2))
+            return [];
+        const onlyRows = onlyIds
+            ? onlyIds.map((id) => this.pos.get(id)).filter((row) => row !== undefined)
+            : null;
+        const dim = this.dim;
+        const matrix = this.matrix;
+        const ids = this.ids;
+        const pairs = [];
+        const limit = Math.max(1, maxPairs);
+        const pushIfSimilar = (i, j) => {
+            let dot = 0;
+            const oi = i * dim;
+            const oj = j * dim;
+            for (let k = 0; k < dim; k += 1)
+                dot += matrix[oi + k] * matrix[oj + k];
+            if (dot < threshold || dot <= 0)
+                return false;
+            pairs.push({ a: ids[i], b: ids[j], score: dot });
+            return pairs.length >= limit;
+        };
+        if (onlyRows && onlyRows.length > 0) {
+            for (const i of onlyRows) {
+                for (const j of allowedRows) {
+                    if (i === j)
+                        continue;
+                    if (pushIfSimilar(i, j)) {
+                        pairs.sort((a, b) => b.score - a.score);
+                        return pairs.slice(0, limit);
+                    }
+                }
+            }
+        }
+        else {
+            for (let x = 0; x < allowedRows.length; x += 1) {
+                const i = allowedRows[x];
+                for (let y = x + 1; y < allowedRows.length; y += 1) {
+                    const j = allowedRows[y];
+                    if (pushIfSimilar(i, j)) {
+                        pairs.sort((a, b) => b.score - a.score);
+                        return pairs.slice(0, limit);
+                    }
+                }
+            }
+        }
+        pairs.sort((a, b) => b.score - a.score);
+        return pairs.slice(0, limit);
+    }
     /** 按元数据重建（换向量器/索引损坏）。 */
     rebuild(db, batchSize = 64) {
         const ids = db.query('SELECT chunk_id FROM chunks').map((row) => row.chunk_id);

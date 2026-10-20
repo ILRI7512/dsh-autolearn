@@ -29,6 +29,7 @@ import { ApprovalService } from "./security/approval.js";
 import { PathPolicy } from "./security/paths.js";
 import { PermissionManager } from "./security/permissions.js";
 import { describeNetworkPolicy } from "./security/network.js";
+import { describeSandbox } from "./security/sandbox.js";
 import { ensurePartitionAllowed, describePartitions } from "./domain/knowledge/domains.js";
 import { AutolearnServices } from "./application/services.js";
 export class AutolearnEngine {
@@ -97,6 +98,9 @@ export class AutolearnEngine {
             maxOutputBytes: config.security.max_output_bytes,
             experimentsDir: config.paths.experiments_dir,
             pathPolicy: this.pathPolicy,
+            sandboxMode: config.security.exec_sandbox,
+            memoryMb: config.security.exec_memory_mb,
+            artifactMb: config.security.exec_artifact_mb,
         });
         this.report = new ReportGenerator({
             db: this.db, repo: this.repo, evaluator: this.evaluator, gaps: this.gaps,
@@ -136,6 +140,14 @@ export class AutolearnEngine {
     }
     get hostApprovalActive() {
         return this.hostApproval;
+    }
+    /**
+     * 仅在 DSH 适配层成功注册 `tools/pre-execute` 审批 hook 后调用。
+     * 没有 hook 就开启委托，等于把 destructive 自动放行（vNext 审计 SEC-09）。
+     */
+    enableHostApproval() {
+        this.permissions.setDelegateToHost(true);
+        this.hostApproval = true;
     }
     /**
      * 宿主设置卡热生效：模式与每日预算在每轮开始时重读（与旧版行为一致）。
@@ -190,6 +202,7 @@ export class AutolearnEngine {
                 pending_confirmations: this.approval.pending().length,
             },
             network: describeNetworkPolicy(this.networkOptions()),
+            execution: describeSandbox(),
             storage: { ...storage, counts: storage },
             integrity,
             index: this.index.stats(),

@@ -1,20 +1,25 @@
 /**
- * 受限代码执行（lab 模式专用）。
+ * 受限代码执行（lab 模式）。
  *
- * 安全边界（必须与安全测试一致）：
- * - 只执行 JavaScript（node --input-type=module -e）；Python 执行不在 TS 版支持范围；
- * - 工作目录限定在 data/experiments 内的新建目录；
- * - 超时强制 kill；stdout/stderr 截断到 max_output_bytes；
- * - 环境变量白名单，不继承 API Key；
- * - 明确声明这是**进程级隔离**，不是安全沙箱。
+ * 默认 strict 沙盒：降权（nobody）+ 网络命名空间（unshare -n）+ Node Permission Model
+ * （只允许读写产物目录，禁止 child_process/worker/addons/inspector）。
+ * 能力不足时**失败关闭**，不会静默退回无隔离执行；只有显式配置 process 才使用旧行为。
+ *
+ * 明确边界：这是“权限 + 命名空间 + 运行时权限模型”的组合，不是 seccomp/LSM 内核沙箱。
  */
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chownSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { newId, utcnowIso } from '../../core/ids.ts'
 import type { PathPolicy } from '../../security/paths.ts'
+import {
+  buildSandboxPlan,
+  prepareArtifactDir,
+  sandboxCapabilities,
+  type SandboxMode,
+} from '../../security/sandbox.ts'
 
-const ENV_ALLOWLIST = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'TZ', 'NODE_PATH']
+const ENV_ALLOWLIST = ['PATH', 'LANG', 'LC_ALL', 'TZ', 'NODE_PATH']
 
 export interface CodeRunOptions {
   trusted: boolean
@@ -22,6 +27,9 @@ export interface CodeRunOptions {
   maxOutputBytes: number
   experimentsDir: string
   pathPolicy: PathPolicy
+  sandboxMode: SandboxMode
+  memoryMb: number
+  artifactMb: number
   practiceId?: string
   projectId?: string
   language?: string
@@ -37,15 +45,19 @@ export interface CodeRunResult {
   stderr: string
   environment: Record<string, unknown>
   isolation: string
+  sandbox: Record<string, unknown>
   artifact_dir: string
 }
 
-function pickEnv(): Record<string, string> {
+function pickEnv(artifactDir: string): Record<string, string> {
   const env: Record<string, string> = {}
   for (const key of ENV_ALLOWLIST) {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
+  // 不继承 API Key；HOME/TMPDIR 指向产物目录，避免写入用户目录。
+  env.HOME = artifactDir
+  env.TMPDIR = artifactDir
   return env
 }
 
@@ -60,45 +72,119 @@ export class CodeTestRunner {
     const experimentsDir = options.experimentsDir ?? this.options.experimentsDir
     const timeoutSeconds = options.timeoutSeconds ?? this.options.timeoutSeconds
     const maxOutput = options.maxOutputBytes ?? this.options.maxOutputBytes
+    const sandboxMode = options.sandboxMode ?? this.options.sandboxMode
+    const memoryMb = options.memoryMb ?? this.options.memoryMb
+    const artifactMb = options.artifactMb ?? this.options.artifactMb
     const language = (options.language ?? 'javascript').toLowerCase()
     const started = Date.now()
     const artifactDir = join(experimentsDir, newId('exp'))
-    mkdirSync(artifactDir, { recursive: true })
-    writeFileSync(join(artifactDir, 'main.mjs'), code, 'utf8')
-    writeFileSync(join(artifactDir, 'spec.json'), `${JSON.stringify({ language, created_at: utcnowIso(), trusted: options.trusted ?? false }, null, 2)}\n`, 'utf8')
+    mkdirSync(artifactDir, { recursive: true, mode: 0o700 })
+    const scriptPath = join(artifactDir, 'main.mjs')
+    writeFileSync(scriptPath, code, 'utf8')
+    writeFileSync(
+      join(artifactDir, 'spec.json'),
+      `${JSON.stringify({ language, created_at: utcnowIso(), trusted: options.trusted ?? false, sandbox: sandboxMode }, null, 2)}\n`,
+      'utf8',
+    )
 
     if (!['javascript', 'js', 'mjs', 'node', 'typescript', 'ts'].includes(language)) {
       return {
         ok: false, status: 'error', exit_code: null, timed_out: false, duration_ms: 0,
-        stdout: '', stderr: `不支持的语言: ${language}（TypeScript 引擎只执行 JavaScript；Python 运行时已移除）`,
+        stdout: '', stderr: `不支持的语言: ${language}（只执行 JavaScript；Python 运行时已移除）`,
         environment: { node: process.version },
-        isolation: 'process', artifact_dir: artifactDir,
+        isolation: 'not-run',
+        sandbox: { mode: sandboxMode, executed: false },
+        artifact_dir: artifactDir,
       }
     }
 
-    const result = await runProcess(process.execPath, ['--input-type=module', join(artifactDir, 'main.mjs')], {
+    const planResult = buildSandboxPlan({ mode: sandboxMode, scriptPath, artifactDir, memoryMb })
+    if (!planResult.ok) {
+      return {
+        ok: false, status: 'error', exit_code: null, timed_out: false, duration_ms: Date.now() - started,
+        stdout: '', stderr: planResult.error,
+        environment: { node: process.version, platform: process.platform },
+        isolation: 'unavailable',
+        sandbox: { mode: sandboxMode, executed: false, error: planResult.error, capabilities: sandboxCapabilities() },
+        artifact_dir: artifactDir,
+      }
+    }
+    const plan = planResult.plan
+    prepareArtifactDir(artifactDir, plan)
+    if (plan.dropUidTo !== undefined) {
+      for (const file of [scriptPath, join(artifactDir, 'spec.json')]) {
+        try {
+          chownSync(file, plan.dropUidTo, plan.dropUidTo)
+        } catch {
+          /* 非 root/不支持时忽略；权限模型仍然生效 */
+        }
+      }
+    }
+
+    const result = await runProcess(plan.command, plan.args, {
       cwd: artifactDir,
       timeoutMs: timeoutSeconds * 1000,
       maxOutputBytes: maxOutput,
-      env: pickEnv(),
+      env: pickEnv(artifactDir),
     })
     const duration = Date.now() - started
-    writeFileSync(join(artifactDir, 'stdout.txt'), result.stdout, 'utf8')
-    writeFileSync(join(artifactDir, 'stderr.txt'), result.stderr, 'utf8')
-    const ok = result.exitCode === 0 && !result.timedOut
+    writeFileSync(join(artifactDir, 'stdout.txt'), result.stdout.slice(0, maxOutput), 'utf8')
+    writeFileSync(join(artifactDir, 'stderr.txt'), result.stderr.slice(0, maxOutput), 'utf8')
+
+    const artifactBytes = directorySize(artifactDir)
+    const sizeLimit = Math.max(1, artifactMb) * 1024 * 1024
+    const oversized = artifactBytes > sizeLimit
+    const sandboxInfo: Record<string, unknown> = {
+      mode: plan.mode,
+      network_isolated: plan.networkIsolated,
+      uid_dropped: plan.uidDropped,
+      permission_model: plan.mode === 'strict',
+      child_process: plan.mode === 'strict' ? 'disabled' : 'allowed',
+      worker: plan.mode === 'strict' ? 'disabled' : 'allowed',
+      artifact_bytes: artifactBytes,
+      artifact_limit_bytes: sizeLimit,
+      warnings: plan.warnings,
+    }
+    const ok = result.exitCode === 0 && !result.timedOut && !oversized
     return {
       ok,
-      status: result.timedOut ? 'timeout' : ok ? 'pass' : 'fail',
+      status: result.timedOut ? 'timeout' : oversized ? 'fail' : ok ? 'pass' : 'fail',
       exit_code: result.exitCode,
       timed_out: result.timedOut,
       duration_ms: duration,
       stdout: result.stdout,
-      stderr: result.stderr,
-      environment: { node: process.version, platform: process.platform, cwd: artifactDir, env_allowlist: ENV_ALLOWLIST },
-      isolation: 'process（非安全沙箱）',
+      stderr: oversized ? `${result.stderr}\n[沙盒] 产物目录超过上限 ${artifactMb}MB（${artifactBytes} bytes）` : result.stderr,
+      environment: {
+        node: process.version, platform: process.platform, cwd: artifactDir,
+        env_allowlist: [...ENV_ALLOWLIST, 'HOME', 'TMPDIR'],
+      },
+      isolation: plan.mode === 'strict' ? 'strict-sandbox' : 'process-only',
+      sandbox: sandboxInfo,
       artifact_dir: artifactDir,
     }
   }
+}
+
+function directorySize(dir: string, depth = 0): number {
+  if (depth > 6) return 0
+  let total = 0
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return 0
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry)
+    try {
+      const stat = statSync(full)
+      if (stat.isDirectory()) total += directorySize(full, depth + 1)
+      else if (stat.isFile()) total += stat.size
+    } catch {
+      /* 运行中被删除的文件忽略 */
+    }
+  }
+  return total
 }
 
 function runProcess(
@@ -107,18 +193,28 @@ function runProcess(
   options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: Record<string, string> },
 ): Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
+    const detached = process.platform !== 'win32'
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached,
     })
     let stdout = ''
     let stderr = ''
     let timedOut = false
     let settled = false
+    const killTree = (): void => {
+      try {
+        if (detached && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL')
+        else child.kill('SIGKILL')
+      } catch {
+        try { child.kill('SIGKILL') } catch { /* 已退出 */ }
+      }
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
+      killTree()
     }, options.timeoutMs)
 
     const collect = (target: 'stdout' | 'stderr') => (chunk: Buffer): void => {
