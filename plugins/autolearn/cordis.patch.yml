@@ -2,8 +2,13 @@
 #
 # 工具不再通过 MCP 子进程注册：plugins/autolearn/index.js 直接调用
 # dist/adapters/dsh/plugin.js，把 11 个原生工具挂到 ctx.tools。
-# 因此本 bundle 不需要向 profile 树插入任何 entry（保持空 patch）。
+#
+# 本行把插件自身插入 profile；没有它，bundle 只是被"选中"，插件不会被实例化。
+# （`dsh plugin add` 会代写这一行；经 plugin_manager install_bundle 安装时必须自带。）
 #
 # 可选的跨 Agent 兼容层见 docs/refactor/mcp-adapter.md：
 #   node dist/adapters/mcp/server.js   （stdio MCP，调用同一个引擎）
-[]
+- insert:
+    - id: autolearn
+      name: '@local/dsh-autolearn'
+      config: {}
