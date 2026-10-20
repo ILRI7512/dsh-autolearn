@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -410,6 +411,9 @@ class PermissionManager:
 
     def request_confirmation(self, action: str, target: str = "", project_id: str = "") -> PermissionDecision:
         token = secrets.token_urlsafe(18)
+        # target 为空时无法在消费阶段做绑定，这里用 action 兜底，
+        # 避免"同 action 的任意 target 都能复用令牌"。
+        target = target or f"action:{action}"
         expires_at = self._expires_at()
         if self.metadata is not None:
             self.metadata.add_confirmation(
@@ -444,15 +448,36 @@ class PermissionManager:
             project_id=project_id,
             detail={"token_issued": True, "ttl_s": CONFIRM_TTL_SECONDS, "persisted": self.metadata is not None},
         )
+        # 注意：令牌**不得**出现在 reason 里。reason 会被工具层直接拼进返回给
+        # 模型的错误消息；一旦模型拿到令牌，而 CLI 又能被模型调用，"用户确认"
+        # 就退化成了"模型自批"。
         return PermissionDecision(
             True,
-            f"需要用户确认：{action}。请在 DSH 审批界面或运行 "
-            f"`python -m dsh_autonomous_learning.main confirmations approve {token}` 后重试。",
+            f"需要用户确认：{action}。请在 DSH 审批界面批准，"
+            "或由用户在交互终端运行 `python -m dsh_autonomous_learning.main "
+            "confirmations list` 查看待确认请求并批准。",
             needs_confirmation=True,
             token=token,
         )
 
-    def approve(self, token: str) -> bool:
+    def approve(self, token: str, *, actor: str = "user", require_tty: bool = False) -> bool:
+        """批准一个待确认请求。
+
+        调用者身份校验：
+        - ``require_tty=True`` 时必须是交互终端（人坐在前面），供 CLI 使用；
+        - 宿主审批 UI 等受信任通道可传 ``require_tty=False``；
+        - 智能体的工具通道**没有**批准入口（见 tools 注册表）。
+        """
+
+        if require_tty and not sys.stdin.isatty():
+            self.audit.log(
+                action="approve_denied_non_tty",
+                target=token[:6] + "…",
+                risk=RiskLevel.DESTRUCTIVE.value,
+                allowed=False,
+                detail={"reason": "非交互环境不允许批准高风险操作", "actor": actor},
+            )
+            return False
         if self.metadata is not None:
             row = self.metadata.get_confirmation(token)
             if not row or row["status"] != "pending" or _expired(row.get("expires_at", "")):

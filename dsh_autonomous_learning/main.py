@@ -245,8 +245,14 @@ def cmd_confirmations(args: argparse.Namespace) -> int:
             print(_json({"pending": runtime.permissions.pending_confirmations()}))
             return 0
         if args.action == "approve":
-            ok = runtime.permissions.approve(args.token)
-            print(_json({"approved": ok, "token": args.token}))
+            ok = runtime.permissions.approve(args.token, require_tty=True)
+            if not ok and not sys.stdin.isatty():
+                print(
+                    "拒绝：批准高风险操作必须在交互终端中执行（非 TTY 环境一律失败）。",
+                    file=sys.stderr,
+                )
+                return 3
+            print(_json({"approved": ok}))
             return 0 if ok else 2
         if args.action == "reject":
             ok = runtime.permissions.reject(args.token, args.note or "")

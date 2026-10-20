@@ -31,11 +31,12 @@ def _require_execution(rt: Runtime, args: Mapping[str, Any], *, action: str, tar
     if decision.allowed and not decision.needs_confirmation:
         return
     if decision.needs_confirmation and not args.get("confirm_token"):
-        request = rt.permissions.request_confirmation(action, target, project_id)
+        rt.permissions.request_confirmation(action, target, project_id)
         raise ToolError(
             f"代码执行需要用户确认：{decision.reason}。"
-            f"可在 DSH 审批界面临时批准，或由用户运行 "
-            f"`python -m dsh_autonomous_learning.main confirmations approve {request.token}` 后带 confirm_token 重试。",
+            "请在 DSH 审批界面批准；或由用户在交互终端运行 "
+            "`python -m dsh_autonomous_learning.main confirmations list` "
+            "查看待确认请求并批准。",
             "ConfirmationRequired",
         )
     if not decision.allowed:

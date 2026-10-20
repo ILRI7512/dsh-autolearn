@@ -36,12 +36,14 @@ def _require(
     if decision.allowed and not decision.needs_confirmation:
         return
     if decision.needs_confirmation and not args.get("confirm_token"):
-        request = rt.permissions.request_confirmation(action, target, project_id)
+        # 生成请求但不回传令牌：令牌一旦进入模型上下文，
+        # "用户确认"就等于把批准权交给了模型自己。
+        rt.permissions.request_confirmation(action, target, project_id)
         raise ToolError(
-            f"该操作需要用户确认：{action}。确认方式二选一："
-            f"(1) 在 DSH 审批界面批准该工具调用（宿主开启 delegate_approval_to_host 时自动生效）；"
-            f"(2) 由用户运行 `python -m dsh_autonomous_learning.main confirmations approve {request.token}`，"
-            f"再把该 token 作为 confirm_token 重试。",
+            f"该操作需要用户确认：{action}。请在 DSH 审批界面批准；"
+            "或由用户在交互终端运行 "
+            "`python -m dsh_autonomous_learning.main confirmations list` "
+            "查看待确认请求并批准。批准后由用户把确认令牌传回本工具。",
             "ConfirmationRequired",
         )
     if not decision.allowed:
