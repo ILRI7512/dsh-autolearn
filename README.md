@@ -188,6 +188,24 @@ python3 -m pytest dsh_autonomous_learning/tests -q   # legacy 基线：197 passe
 | 插件加载失败 | 确认已 `pnpm build`（`dist/` 存在）、Node ≥22.6、`@local/dsh-autolearn` 在 bundles |
 | 需要回滚到 v1.2 | `git checkout baseline-python-v1.2`；数据库 v7 双向可读 |
 
+### 2026-10-20 · 插件 entry 激活失败（`webServer` 未注入）
+
+**现象**：启动日志出现 `cannot get property "webServer" without inject`，紧随
+`autolearn (@local/dsh-autolearn): Error: …` 与 `dsh: warning: N entries did not activate`。
+`apply()` 虽然先打印了 `[dsh-autolearn] 原生工具已注册: 11 个`，但 entry 整体激活失败，
+注册随 fiber 一并回滚——**11 个原生工具和设置卡全部不可用**。
+
+**根因**：Cordis 对**未在 `inject` 中声明**的服务做属性取值会抛错。原实现写的是
+`ctx?.webServer ?? ctx?.get?.('webServer')`，第一个操作数就抛错，`??` 右边没有机会执行；
+而顶层声明只有 `export const inject = ['tools']`。
+
+**修复**：把「挂设置卡路由」放进子注入上下文 `ctx.inject(['webServer'], …)`，
+主插件仍然只硬依赖 `tools`。不能简单把 `webServer` 写进顶层 inject——headless/CLI profile
+没有 web server，entry 会永久 `pending`，工具同样失效。修好后的 web profile 会打印
+`[dsh-autolearn] settings API ready: <settingsPath>`。
+
+细节（含 headless / web 两场景验证表）见 [docs/修复记录-2026-10-20-webServer注入.md](docs/修复记录-2026-10-20-webServer注入.md)。
+
 ## 已知限制（不假装完成）
 
 1. **PDF/DOCX 解析未迁移**：会明确报错并建议转换为 Markdown/TXT；HTML 用正则清洗（非 DOM）。
