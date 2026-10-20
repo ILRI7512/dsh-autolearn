@@ -91,6 +91,7 @@ class EmbeddingConfig:
     api_key_env: str = "DSH_AL_EMBEDDING_API_KEY"
     timeout_s: int = 30
     batch_size: int = 32
+    cache: bool = True  # 同内容同向量器复用 embedding（关掉会全量重算）
 
     def validate(self) -> None:
         if self.provider not in {"hashing", "openai", "sentence_transformers"}:
@@ -101,7 +102,6 @@ class EmbeddingConfig:
             raise ConfigError("embedding.provider=openai 时必须配置 base_url")
         if self.timeout_s <= 0:
             raise ConfigError("embedding.timeout_s 必须为正数")
-
 
 @dataclass
 class ModelConfig:

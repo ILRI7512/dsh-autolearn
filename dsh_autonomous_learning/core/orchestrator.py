@@ -138,7 +138,9 @@ def build_runtime(config: Config, *, mode: Optional[str] = None) -> Runtime:
     metadata = MetadataStore(config.paths.db_path)
     metadata.migrate()
     embedder = build_embedder(config.embedding)
-    store = KnowledgeStore(metadata, config.paths.index_dir, embedder, config.retrieval)
+    store = KnowledgeStore(
+        metadata, config.paths.index_dir, embedder, config.retrieval, config.embedding
+    )
     model = build_model(config.model)
     permissions = PermissionManager(
         config.security,

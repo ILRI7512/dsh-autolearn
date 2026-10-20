@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 from ..core.models import new_id
 from .tokenizer import BM25Params, expand_query
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: 逐版本迁移步骤（在新库上由 SCHEMA_SQL 直接建好，旧库按版本号补齐）。
 #: 每条语句都必须是幂等的：迁移可能在部分失败后重跑。
@@ -44,6 +44,16 @@ MIGRATIONS: Dict[int, Tuple[str, ...]] = {
     4: (
         # 真实阶段进度：registered/fetched/parsed/extracted/classified/indexed
         "ALTER TABLE documents ADD COLUMN stages TEXT NOT NULL DEFAULT '{}'",
+    ),
+    6: (
+        # embedding 缓存：同内容同向量器只算一次（审计 S-15）
+        "CREATE TABLE IF NOT EXISTS embedding_cache ("
+        " cache_key TEXT PRIMARY KEY,"
+        " embedder_id TEXT NOT NULL,"
+        " dim INTEGER NOT NULL,"
+        " vector BLOB NOT NULL,"
+        " created_at TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_embedding_cache_embedder ON embedding_cache(embedder_id)",
     ),
     5: (
         # 知识结构补齐（审计 K 组：目标 22 字段里 10 项在 schema 层就缺失）
@@ -231,6 +241,15 @@ CREATE INDEX IF NOT EXISTS idx_sources_location ON sources(project_id, location)
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_domain ON chunks(domain, topic);
 CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status, verification_status);
+
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    cache_key   TEXT PRIMARY KEY,
+    embedder_id TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_cache_embedder ON embedding_cache(embedder_id);
 
 CREATE TABLE IF NOT EXISTS chunk_versions (
     id            TEXT PRIMARY KEY,
@@ -445,6 +464,7 @@ JSON_COLUMNS: Dict[str, Tuple[str, ...]] = {
     "metrics": ("metadata",),
     "audit_log": ("detail",),
     "chunk_versions": (),
+    "embedding_cache": (),
     "llm_calls": (),
     "schedules": (),
 }
@@ -500,6 +520,7 @@ COLUMNS: Dict[str, Tuple[str, ...]] = {
         "id", "chunk_id", "version", "content_hash", "content", "status",
         "change_reason", "changed_at",
     ),
+    "embedding_cache": ("cache_key", "embedder_id", "dim", "vector", "created_at"),
     "verification_records": (
         "record_id", "chunk_id", "method", "result", "evidence", "notes", "verifier",
         "created_at",
@@ -551,6 +572,7 @@ PRIMARY_KEYS = {
     "documents": "document_id",
     "chunks": "chunk_id",
     "chunk_versions": "id",
+    "embedding_cache": "cache_key",
     "verification_records": "record_id",
     "conflicts": "conflict_id",
     "duplicates": "dup_id",
@@ -1264,6 +1286,54 @@ class MetadataStore:
             args.append(project_id)
         sql += " ORDER BY similarity DESC"
         return self.query_dicts(sql, args)
+
+    # ------------------------------------------------------------------ #
+    # embedding 缓存（同内容同向量器只算一次）
+    # ------------------------------------------------------------------ #
+    def get_embedding_blobs(self, keys: Sequence[str], embedder_id: str) -> Dict[str, bytes]:
+        if not keys:
+            return {}
+        out: Dict[str, bytes] = {}
+        unique = list(dict.fromkeys(keys))
+        for start in range(0, len(unique), 400):
+            batch = unique[start : start + 400]
+            rows = self.query(
+                f"SELECT cache_key, vector FROM embedding_cache WHERE embedder_id=? "
+                f"AND cache_key IN ({','.join('?' * len(batch))})",
+                [embedder_id, *batch],
+            )
+            for row in rows:
+                out[row["cache_key"]] = bytes(row["vector"])
+        return out
+
+    def put_embedding_blobs(self, items: Sequence[Mapping[str, Any]]) -> int:
+        """批量写入缓存（一个事务）。"""
+
+        if not items:
+            return 0
+        written = 0
+        with self.transaction() as conn:
+            for item in items:
+                conn.execute(
+                    "INSERT OR REPLACE INTO embedding_cache"
+                    "(cache_key, embedder_id, dim, vector, created_at) VALUES (?,?,?,?,?)",
+                    (
+                        item["cache_key"],
+                        item["embedder_id"],
+                        int(item["dim"]),
+                        item["vector"],
+                        item.get("created_at") or _now(),
+                    ),
+                )
+                written += 1
+        return written
+
+    def embedding_cache_stats(self, embedder_id: str = "") -> Dict[str, int]:
+        if embedder_id:
+            total = self.scalar("SELECT COUNT(*) FROM embedding_cache WHERE embedder_id=?", (embedder_id,), 0)
+        else:
+            total = self.scalar("SELECT COUNT(*) FROM embedding_cache", (), 0)
+        return {"entries": int(total or 0)}
 
     def record_duplicate(
         self,

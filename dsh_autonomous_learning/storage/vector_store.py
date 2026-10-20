@@ -82,8 +82,10 @@ class KnowledgeStore:
         index_dir: str | Path,
         embedder: BaseEmbedder,
         retrieval: Optional[RetrievalConfig] = None,
+        embedding_config: Any = None,
     ) -> None:
         self.metadata = metadata
+        self.embedding_config = embedding_config
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.embedder = embedder
@@ -227,20 +229,70 @@ class KnowledgeStore:
     # ------------------------------------------------------------------ #
     # 写入
     # ------------------------------------------------------------------ #
+    def _cache_key(self, text: str) -> str:
+        return stable_hash(f"{self.embedder.embedder_id}|{text}")
+
     def _vectorize(self, chunks: Sequence[Mapping[str, Any]]) -> np.ndarray:
-        texts = [_index_text(c) for c in chunks]
-        try:
-            matrix = self.embedder.embed(texts)
-        except EmbeddingError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise KnowledgeStoreError(f"向量化失败: {exc}") from exc
-        matrix = np.asarray(matrix, dtype=np.float32)
-        if matrix.ndim != 2 or matrix.shape[1] != (self.embedder.dim or matrix.shape[1]):
-            raise KnowledgeStoreError("向量化返回的维度不符合预期")
-        if not self.embedder.dim:
-            self.embedder.dim = int(matrix.shape[1])
-        return matrix
+        return self._embed_texts([_index_text(c) for c in chunks])
+
+    def _embed_texts(self, texts: Sequence[str]) -> np.ndarray:
+        """带 embedding 缓存的向量化。
+
+        历史实现每次 add/update/rebuild/search 都重新调用向量器（审计 S-15）；
+        同内容同向量器命中缓存时直接复用，向量器换了则 cache_key 自然不同。
+        """
+
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.embedder.dim or 0), dtype=np.float32)
+        use_cache = bool(getattr(self.embedding_config, "cache", True))
+        keys = [self._cache_key(text) for text in texts]
+        cached = self.metadata.get_embedding_blobs(keys, self.embedder.embedder_id) if use_cache else {}
+        dim = int(self.embedder.dim or 0)
+        matrix = np.zeros((len(texts), dim), dtype=np.float32)
+        missing: List[int] = []
+        for index, key in enumerate(keys):
+            blob = cached.get(key)
+            if not blob:
+                missing.append(index)
+                continue
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if dim and vector.shape[0] != dim:
+                missing.append(index)
+                continue
+            matrix[index] = vector
+        if missing:
+            missing_texts = [texts[i] for i in missing]
+            try:
+                fresh = np.asarray(self.embedder.embed(missing_texts), dtype=np.float32)
+            except EmbeddingError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise KnowledgeStoreError(f"向量化失败: {exc}") from exc
+            if fresh.ndim != 2 or fresh.shape[0] != len(missing_texts):
+                raise KnowledgeStoreError("向量化返回的行数不符合预期")
+            if not dim:
+                dim = int(fresh.shape[1])
+                self.embedder.dim = dim
+                matrix = np.zeros((len(texts), dim), dtype=np.float32)
+            if fresh.shape[1] != dim:
+                raise KnowledgeStoreError("向量化返回的维度不符合预期")
+            matrix[missing] = fresh
+            if use_cache:
+                self.metadata.put_embedding_blobs(
+                    [
+                        {
+                            "cache_key": keys[i],
+                            "embedder_id": self.embedder.embedder_id,
+                            "dim": dim,
+                            "vector": np.asarray(fresh[pos], dtype=np.float32).tobytes(),
+                        }
+                        for pos, i in enumerate(missing)
+                    ]
+                )
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return matrix / norms
 
     def add_chunks(self, chunks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         """批量写入知识片段。
@@ -577,7 +629,7 @@ class KnowledgeStore:
     ) -> List[Tuple[str, float]]:
         if not self._ids or not allowed:
             return []
-        qv = self.embedder.embed_one(query or "").astype(np.float32)
+        qv = self._embed_texts([query or ""])[0].astype(np.float32)
         if qv.shape[0] != self._matrix.shape[1]:
             raise KnowledgeStoreError(
                 f"查询向量维度 {qv.shape[0]} 与索引维度 {self._matrix.shape[1]} 不一致"
