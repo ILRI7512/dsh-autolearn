@@ -48,6 +48,8 @@ pnpm py:test      # 96 项 pytest（需先 pnpm py:install）
 
 ```bash
 python -m pip install -r dsh_autonomous_learning/requirements.txt
+# 注意：MCP SDK 必须是 1.x（requirements.txt 已收窄为 mcp>=1.2,<2）；
+# 2.x 移除了 @server.list_tools / call_tool 装饰器，插件会启动即失败。
 PYTHONPATH=. python -m dsh_autonomous_learning.main --home dsh_autonomous_learning project-create \
   --goal "学习外汇量化交易基础" --domain quant --plan
 PYTHONPATH=. python -m dsh_autonomous_learning.main --home dsh_autonomous_learning run --project prj_xxx
