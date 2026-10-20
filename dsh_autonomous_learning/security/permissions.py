@@ -100,14 +100,19 @@ class PermissionManager:
         # 心跳文件才会新鲜。插件被禁用/崩溃时心跳过期，本插件自动退回本地令牌流程
         # （fail-closed），避免"以为有人审批、其实无人把关"的漏洞。
         if delegate_to_host is None:
-            if security.delegate_approval_to_host:
-                delegate_to_host = True
-            else:
-                env = os.environ.get("DSH_AL_HOST_APPROVAL", "").strip().lower()
-                env_wants = env in {"1", "true", "yes", "on"}
+            env = os.environ.get("DSH_AL_HOST_APPROVAL", "").strip().lower()
+            # 环境变量与配置开关都只是"愿意委派"的意图声明，**不能**作为
+            # 委派依据：它们由插件 bundle 无条件注入，被禁用/崩溃的闸门同样能让
+            # 它们为真。唯一判据是闸门此刻是否真的在运行（安装 + 未禁用 + 心跳）。
+            env_wants = env in {"1", "true", "yes", "on"} or bool(
+                security.delegate_approval_to_host
+            )
+            try:
                 available = env_wants and self._host_gate_available()
-                delegate_to_host = bool(available)
-                if env_wants and not delegate_to_host:
+            except Exception:  # noqa: BLE001 - 探测失败一律按不可用处理
+                available = False
+            delegate_to_host = bool(available)
+            if env_wants and not delegate_to_host:
                     self.audit.log(
                         action="host_approval_unavailable",
                         target=str(self.heartbeat_path or ""),
@@ -179,9 +184,10 @@ class PermissionManager:
             return 0
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            return int(payload.get("generation", 0))
+            return max(0, int(payload.get("generation", 0)))
         except (OSError, ValueError, TypeError):
-            return 0
+            # 标记损坏：无法确认是旧代闸门，按"需要心跳"的新代处理（fail-closed）
+            return 2
 
     def _host_gate_enabled(self) -> bool:
         """profile patch 里是否被显式 disabled。
@@ -195,8 +201,11 @@ class PermissionManager:
         patch = profile / "cordis.patch.yml"
         try:
             text = patch.read_text(encoding="utf-8")
-        except OSError:
+        except FileNotFoundError:
             return True
+        except OSError:
+            # 文件存在但读不出来：无法证明闸门启用 → 按未启用处理
+            return False
         match = re.search(
             r"(?ms)^-\s*id:\s*autolearn-approval\s*$(.*?)(?=^-\s*id:|\Z)", text
         )

@@ -108,8 +108,20 @@ def test_disabled_in_profile_patch_fails_closed(config, tmp_path, monkeypatch):
     assert manager.delegate_to_host is False
 
 
-def test_explicit_config_delegation_wins(config, tmp_path, monkeypatch):
-    monkeypatch.delenv("DSH_AL_HOST_APPROVAL", raising=False)
+def test_explicit_config_delegation_requires_live_gate(config, tmp_path, monkeypatch):
+    """配置开关只表达意图：没有活闸门不委派，有闸门才委派。
+
+    v1.1.0 的旧用例叫 ``test_explicit_config_delegation_wins``，断言"配置为真即委派"，
+    那正是 fail-open 本身；而且它只在开发机上恰好装了审批插件时才通过。
+    """
+
+    monkeypatch.setenv("DSH_AL_HOST_APPROVAL", "1")
     config.security.delegate_approval_to_host = True
-    manager = _manager(config, tmp_path)
-    assert manager.delegate_to_host is True
+
+    monkeypatch.setenv("DSH_PROFILE_DIR", str(tmp_path / "empty-profile"))
+    monkeypatch.delenv("DSH_HOME", raising=False)
+    assert _manager(config, tmp_path).delegate_to_host is False
+
+    monkeypatch.setenv("DSH_PROFILE_DIR", str(_profile(tmp_path)))
+    monkeypatch.delenv("DSH_AL_HOST_APPROVAL_FILE", raising=False)
+    assert _manager(config, tmp_path).delegate_to_host is True
