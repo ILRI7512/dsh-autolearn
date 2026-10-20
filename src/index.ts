@@ -76,7 +76,7 @@ export class AutolearnEngine {
   readonly pathPolicy: PathPolicy
   readonly index: VectorIndex
   readonly services: AutolearnServices
-  private readonly hostApproval: boolean
+  private hostApproval: boolean
   private closed = false
 
   private constructor(config: Config, hostApproval: boolean, telemetry?: EngineOptions['telemetry']) {
@@ -168,6 +168,15 @@ export class AutolearnEngine {
 
   get hostApprovalActive(): boolean {
     return this.hostApproval
+  }
+
+  /**
+   * 仅在 DSH 适配层成功注册 `tools/pre-execute` 审批 hook 后调用。
+   * 没有 hook 就开启委托，等于把 destructive 自动放行（vNext 审计 SEC-09）。
+   */
+  enableHostApproval(): void {
+    this.permissions.setDelegateToHost(true)
+    this.hostApproval = true
   }
 
   /**

@@ -1,0 +1,111 @@
+{
+  "generated_at": "2026-10-20T09:35:42.425Z",
+  "environment": {
+    "node": "v24.19.0",
+    "platform": "linux 6.6.118-android15-8-gc44b714366cc-abogki519650608-4k",
+    "cpu": "unknown",
+    "cpus": 0
+  },
+  "cold_start_ms": {
+    "samples": [
+      40.8,
+      34.6,
+      32.6,
+      35.9,
+      38
+    ],
+    "median": 35.87
+  },
+  "write": [
+    {
+      "chunks": 100,
+      "added": 100,
+      "write_ms": 264.6
+    },
+    {
+      "chunks": 500,
+      "added": 400,
+      "write_ms": 972.2
+    },
+    {
+      "chunks": 1000,
+      "added": 500,
+      "write_ms": 1179.8
+    }
+  ],
+  "search": [
+    {
+      "chunks": 100,
+      "keyword_p50_ms": 2.43,
+      "keyword_p95_ms": 4.51,
+      "vector_p50_ms": 2.75,
+      "vector_p95_ms": 8.12,
+      "hybrid_p50_ms": 3.79,
+      "hybrid_p95_ms": 5.56
+    },
+    {
+      "chunks": 500,
+      "keyword_p50_ms": 5.31,
+      "keyword_p95_ms": 9.02,
+      "vector_p50_ms": 3.47,
+      "vector_p95_ms": 13.84,
+      "hybrid_p50_ms": 7.56,
+      "hybrid_p95_ms": 18.31
+    },
+    {
+      "chunks": 1000,
+      "keyword_p50_ms": 9.4,
+      "keyword_p95_ms": 13.55,
+      "vector_p50_ms": 4.74,
+      "vector_p95_ms": 9.79,
+      "hybrid_p50_ms": 12.23,
+      "hybrid_p95_ms": 16.16
+    }
+  ],
+  "find_duplicates": [
+    {
+      "chunks": 200,
+      "pairs": 22,
+      "find_duplicates_ms": 26.3
+    },
+    {
+      "chunks": 500,
+      "pairs": 75,
+      "find_duplicates_ms": 147
+    },
+    {
+      "chunks": 800,
+      "pairs": 181,
+      "find_duplicates_ms": 359.7
+    }
+  ],
+  "read_100_ms": 9,
+  "memory_rss_mb": 246.9,
+  "db_bytes": 6598656,
+  "index_bytes": 2060019,
+  "embedding_cache_entries": 1000,
+  "ingest": [
+    {
+      "target_kb": 10,
+      "actual_chars": 10499,
+      "drafts": 41,
+      "extract_ms": 18.3,
+      "write_ms": 291.9,
+      "total_ms": 310.2
+    },
+    {
+      "target_kb": 100,
+      "actual_chars": 102864,
+      "drafts": 390,
+      "extract_ms": 70.6,
+      "write_ms": 2777.3,
+      "total_ms": 2847.9
+    }
+  ],
+  "learning_round": {
+    "elapsed_ms": 72.2,
+    "tasks": 6,
+    "stop_reason": "max_tasks_per_run",
+    "chunks": 2
+  }
+}

@@ -34,6 +34,13 @@ export class PermissionManager {
     get mode() {
         return this.currentMode;
     }
+    /**
+     * 宿主审批是否**真的**已挂载。
+     * 只允许在成功注册 tools/pre-execute hook 之后调用；否则 destructive 会绕过确认。
+     */
+    setDelegateToHost(active) {
+        this.delegateDefault = active;
+    }
     setMode(mode) {
         const normalized = mode.trim().toLowerCase();
         if (!MODES.includes(normalized)) {

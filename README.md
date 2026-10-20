@@ -8,7 +8,8 @@
 > - 11 个 DSH 原生工具（由 60 个 MCP 工具收敛而来）+ 1 个用户侧 CLI；
 > - 保留可选 MCP 适配器（默认关闭，调用同一引擎）；
 > - 数据库 schema 与 v1.2 完全兼容（v7），旧知识库可直接打开；
-> - 测试：**148 项 node:test 全过**；旧 Python 实现保留为 legacy（197 项 pytest 仍可跑）。
+> - 测试：**162 项 node:test 全过**；旧 Python 实现保留为 legacy（197 项 pytest 仍可跑）。
+- 审计/评测/性能基线：`reports/`（含 12 份报告与原始 JSON），可重复脚本见 `scripts/`。
 >
 > 详细审计、依赖地图、迁移状态与实测数据见 `docs/refactor/`。
 
@@ -168,12 +169,12 @@ MCP 客户端配置示例：
 ## 测试
 
 ```bash
-npm test             # 148 tests / 31 suites（node:test）
+npm test             # 162 tests / 39 suites（node:test）
 npm run typecheck    # strict TS
 python3 -m pytest dsh_autonomous_learning/tests -q   # legacy 基线：197 passed
 ```
 
-覆盖：类型检查、单元、数据库集成、知识与全文检索、向量/索引一致性、版本回滚、任务恢复、预算、权限、审批拒绝、SSRF、路径穿越、跨项目隔离、并发写、备份恢复、DSH 工具注册/卸载、MCP 真实子进程、CLI 审批、旧库兼容。
+覆盖：类型检查、单元、数据库集成、知识与全文检索、向量/索引一致性、版本回滚、任务恢复、预算、权限、审批拒绝、SSRF（含 IPv6）、路径穿越、跨项目隔离、并发写、备份恢复、DSH 工具注册/卸载、MCP 真实子进程、CLI 审批、旧库兼容、本地 HTTP 抓取策略、Prompt Injection。
 
 ## 故障恢复
 

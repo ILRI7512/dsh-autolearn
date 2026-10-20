@@ -1,0 +1,874 @@
+{
+  "generated_at": "2026-10-20T09:39:50.509Z",
+  "docs": 20,
+  "queries": 11,
+  "summary": {
+    "keyword": {
+      "queries": 11,
+      "recall_at_8": 1,
+      "mrr": 0.955,
+      "ndcg_at_8": 0.966,
+      "latency_p50_ms": 0.99,
+      "latency_p95_ms": 5.16
+    },
+    "vector": {
+      "queries": 11,
+      "recall_at_8": 0.909,
+      "mrr": 0.848,
+      "ndcg_at_8": 0.842,
+      "latency_p50_ms": 2.7,
+      "latency_p95_ms": 6.91
+    },
+    "hybrid": {
+      "queries": 11,
+      "recall_at_8": 0.909,
+      "mrr": 0.894,
+      "ndcg_at_8": 0.876,
+      "latency_p50_ms": 2.47,
+      "latency_p95_ms": 5.54
+    }
+  },
+  "by_category": {
+    "keyword": {
+      "exact_short": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "exact_term": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "synonym": {
+        "queries": 2,
+        "recall_at_8": 1,
+        "mrr": 0.75
+      },
+      "paraphrase": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "mixed_lang": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "long_question": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "multi_term": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "similar_entries": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "stale_vs_current": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "missing_knowledge": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      }
+    },
+    "vector": {
+      "exact_short": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "exact_term": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "synonym": {
+        "queries": 2,
+        "recall_at_8": 1,
+        "mrr": 0.75
+      },
+      "paraphrase": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 0.5
+      },
+      "mixed_lang": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "long_question": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "multi_term": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "similar_entries": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "stale_vs_current": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "missing_knowledge": {
+        "queries": 1,
+        "recall_at_8": 0,
+        "mrr": 0.333
+      }
+    },
+    "hybrid": {
+      "exact_short": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "exact_term": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "synonym": {
+        "queries": 2,
+        "recall_at_8": 1,
+        "mrr": 0.75
+      },
+      "paraphrase": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "mixed_lang": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "long_question": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "multi_term": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "similar_entries": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "stale_vs_current": {
+        "queries": 1,
+        "recall_at_8": 1,
+        "mrr": 1
+      },
+      "missing_knowledge": {
+        "queries": 1,
+        "recall_at_8": 0,
+        "mrr": 0.333
+      }
+    }
+  },
+  "results": {
+    "keyword": {
+      "mode": "keyword",
+      "latency": [
+        5.161231000000043,
+        0.8611539999997149,
+        1.391769000000295,
+        0.8800770000002558,
+        0.8083850000002712,
+        1.2357699999997749,
+        1.143999999999778,
+        0.9858460000000377,
+        0.8000769999998738,
+        1.3187699999998586,
+        0.27561500000001615
+      ],
+      "rows": [
+        {
+          "id": "q1",
+          "category": "exact_short",
+          "query": "滑点",
+          "expected": [
+            "slip"
+          ],
+          "top": [
+            "slip",
+            "edge"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 5.16,
+          "warnings": 0
+        },
+        {
+          "id": "q2",
+          "category": "exact_term",
+          "query": "夏普比率",
+          "expected": [
+            "sharpe"
+          ],
+          "top": [
+            "sharpe"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 0.86,
+          "warnings": 0
+        },
+        {
+          "id": "q3",
+          "category": "synonym",
+          "query": "持仓规模",
+          "expected": [
+            "position"
+          ],
+          "top": [
+            "funding",
+            "position"
+          ],
+          "rank": 2,
+          "recall": 1,
+          "mrr": 0.5,
+          "ndcg": 0.631,
+          "latency_ms": 1.39,
+          "warnings": 0
+        },
+        {
+          "id": "q4",
+          "category": "synonym",
+          "query": "交易滑价",
+          "expected": [
+            "slip"
+          ],
+          "top": [
+            "slip"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 0.88,
+          "warnings": 0
+        },
+        {
+          "id": "q5",
+          "category": "paraphrase",
+          "query": "怎样避免被强制平仓",
+          "expected": [
+            "stoploss"
+          ],
+          "top": [
+            "stoploss",
+            "position"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 0.81,
+          "warnings": 0
+        },
+        {
+          "id": "q6",
+          "category": "mixed_lang",
+          "query": "drawdown 回撤",
+          "expected": [
+            "mixed"
+          ],
+          "top": [
+            "mixed",
+            "drawdown",
+            "current_drawdown",
+            "stale_drawdown"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 1.24,
+          "warnings": 0
+        },
+        {
+          "id": "q7",
+          "category": "long_question",
+          "query": "在高杠杆的情况下，保证金不足会导致什么后果，应该如何设置止损",
+          "expected": [
+            "leverage",
+            "stoploss"
+          ],
+          "top": [
+            "stoploss",
+            "leverage",
+            "execution",
+            "mixed",
+            "position"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 1.14,
+          "warnings": 0
+        },
+        {
+          "id": "q8",
+          "category": "multi_term",
+          "query": "保证金 强平 风险",
+          "expected": [
+            "leverage",
+            "stoploss"
+          ],
+          "top": [
+            "stoploss",
+            "leverage",
+            "execution",
+            "correlation",
+            "position"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 0.99,
+          "warnings": 0
+        },
+        {
+          "id": "q9",
+          "category": "similar_entries",
+          "query": "三均线 60日 过滤",
+          "expected": [
+            "ma_b"
+          ],
+          "top": [
+            "ma_b",
+            "ma_a",
+            "ma_c"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 0.8,
+          "warnings": 0
+        },
+        {
+          "id": "q10",
+          "category": "stale_vs_current",
+          "query": "最大回撤 计算口径",
+          "expected": [
+            "current_drawdown"
+          ],
+          "top": [
+            "current_drawdown",
+            "drawdown",
+            "stale_drawdown",
+            "sharpe",
+            "mixed"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 1.32,
+          "warnings": 0
+        },
+        {
+          "id": "q11",
+          "category": "missing_knowledge",
+          "query": "天气衍生品 定价模型",
+          "expected": [],
+          "top": [],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 0.28,
+          "warnings": 1
+        }
+      ]
+    },
+    "vector": {
+      "mode": "vector",
+      "latency": [
+        3.18707699999959,
+        3.3966920000002574,
+        2.8732310000000325,
+        2.6042310000002544,
+        6.910154000000148,
+        1.9865380000001096,
+        3.618077000000085,
+        2.7024619999997412,
+        1.945615000000089,
+        2.1577689999999166,
+        1.854460999999901
+      ],
+      "rows": [
+        {
+          "id": "q1",
+          "category": "exact_short",
+          "query": "滑点",
+          "expected": [
+            "slip"
+          ],
+          "top": [
+            "slip",
+            "edge"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 3.19,
+          "warnings": 0
+        },
+        {
+          "id": "q2",
+          "category": "exact_term",
+          "query": "夏普比率",
+          "expected": [
+            "sharpe"
+          ],
+          "top": [
+            "sharpe"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 3.4,
+          "warnings": 0
+        },
+        {
+          "id": "q3",
+          "category": "synonym",
+          "query": "持仓规模",
+          "expected": [
+            "position"
+          ],
+          "top": [
+            "funding",
+            "position"
+          ],
+          "rank": 2,
+          "recall": 1,
+          "mrr": 0.5,
+          "ndcg": 0.631,
+          "latency_ms": 2.87,
+          "warnings": 0
+        },
+        {
+          "id": "q4",
+          "category": "synonym",
+          "query": "交易滑价",
+          "expected": [
+            "slip"
+          ],
+          "top": [
+            "slip",
+            "stoploss"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.6,
+          "warnings": 0
+        },
+        {
+          "id": "q5",
+          "category": "paraphrase",
+          "query": "怎样避免被强制平仓",
+          "expected": [
+            "stoploss"
+          ],
+          "top": [
+            "correlation",
+            "stoploss",
+            "options",
+            "position"
+          ],
+          "rank": 2,
+          "recall": 1,
+          "mrr": 0.5,
+          "ndcg": 0.631,
+          "latency_ms": 6.91,
+          "warnings": 0
+        },
+        {
+          "id": "q6",
+          "category": "mixed_lang",
+          "query": "drawdown 回撤",
+          "expected": [
+            "mixed"
+          ],
+          "top": [
+            "mixed",
+            "current_drawdown",
+            "stale_drawdown",
+            "drawdown"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 1.99,
+          "warnings": 0
+        },
+        {
+          "id": "q7",
+          "category": "long_question",
+          "query": "在高杠杆的情况下，保证金不足会导致什么后果，应该如何设置止损",
+          "expected": [
+            "leverage",
+            "stoploss"
+          ],
+          "top": [
+            "leverage",
+            "stoploss",
+            "mixed",
+            "correlation",
+            "backtest"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 3.62,
+          "warnings": 0
+        },
+        {
+          "id": "q8",
+          "category": "multi_term",
+          "query": "保证金 强平 风险",
+          "expected": [
+            "leverage",
+            "stoploss"
+          ],
+          "top": [
+            "stoploss",
+            "leverage",
+            "correlation",
+            "execution",
+            "position"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.7,
+          "warnings": 0
+        },
+        {
+          "id": "q9",
+          "category": "similar_entries",
+          "query": "三均线 60日 过滤",
+          "expected": [
+            "ma_b"
+          ],
+          "top": [
+            "ma_b",
+            "ma_a",
+            "ma_c",
+            "leverage"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 1.95,
+          "warnings": 0
+        },
+        {
+          "id": "q10",
+          "category": "stale_vs_current",
+          "query": "最大回撤 计算口径",
+          "expected": [
+            "current_drawdown"
+          ],
+          "top": [
+            "current_drawdown",
+            "drawdown",
+            "stale_drawdown",
+            "mixed",
+            "sharpe"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.16,
+          "warnings": 0
+        },
+        {
+          "id": "q11",
+          "category": "missing_knowledge",
+          "query": "天气衍生品 定价模型",
+          "expected": [],
+          "top": [
+            "current_drawdown",
+            "sharpe"
+          ],
+          "rank": 3,
+          "recall": 0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0,
+          "latency_ms": 1.85,
+          "warnings": 0
+        }
+      ]
+    },
+    "hybrid": {
+      "mode": "hybrid",
+      "latency": [
+        2.376923000000261,
+        2.8031529999998384,
+        1.6236920000001192,
+        2.632231000000047,
+        2.6396920000001955,
+        2.2769230000003517,
+        5.541461000000254,
+        1.9720769999998993,
+        2.473769000000175,
+        3.07569199999989,
+        1.9897689999997965
+      ],
+      "rows": [
+        {
+          "id": "q1",
+          "category": "exact_short",
+          "query": "滑点",
+          "expected": [
+            "slip"
+          ],
+          "top": [
+            "slip",
+            "edge"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.38,
+          "warnings": 0
+        },
+        {
+          "id": "q2",
+          "category": "exact_term",
+          "query": "夏普比率",
+          "expected": [
+            "sharpe"
+          ],
+          "top": [
+            "sharpe"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.8,
+          "warnings": 0
+        },
+        {
+          "id": "q3",
+          "category": "synonym",
+          "query": "持仓规模",
+          "expected": [
+            "position"
+          ],
+          "top": [
+            "funding",
+            "position"
+          ],
+          "rank": 2,
+          "recall": 1,
+          "mrr": 0.5,
+          "ndcg": 0.631,
+          "latency_ms": 1.62,
+          "warnings": 0
+        },
+        {
+          "id": "q4",
+          "category": "synonym",
+          "query": "交易滑价",
+          "expected": [
+            "slip"
+          ],
+          "top": [
+            "slip",
+            "stoploss"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.63,
+          "warnings": 0
+        },
+        {
+          "id": "q5",
+          "category": "paraphrase",
+          "query": "怎样避免被强制平仓",
+          "expected": [
+            "stoploss"
+          ],
+          "top": [
+            "stoploss",
+            "position",
+            "correlation",
+            "options"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.64,
+          "warnings": 0
+        },
+        {
+          "id": "q6",
+          "category": "mixed_lang",
+          "query": "drawdown 回撤",
+          "expected": [
+            "mixed"
+          ],
+          "top": [
+            "mixed",
+            "current_drawdown",
+            "drawdown",
+            "stale_drawdown"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.28,
+          "warnings": 0
+        },
+        {
+          "id": "q7",
+          "category": "long_question",
+          "query": "在高杠杆的情况下，保证金不足会导致什么后果，应该如何设置止损",
+          "expected": [
+            "leverage",
+            "stoploss"
+          ],
+          "top": [
+            "leverage",
+            "stoploss",
+            "mixed",
+            "correlation",
+            "backtest"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 5.54,
+          "warnings": 0
+        },
+        {
+          "id": "q8",
+          "category": "multi_term",
+          "query": "保证金 强平 风险",
+          "expected": [
+            "leverage",
+            "stoploss"
+          ],
+          "top": [
+            "stoploss",
+            "leverage",
+            "correlation",
+            "execution",
+            "position"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 1.97,
+          "warnings": 0
+        },
+        {
+          "id": "q9",
+          "category": "similar_entries",
+          "query": "三均线 60日 过滤",
+          "expected": [
+            "ma_b"
+          ],
+          "top": [
+            "ma_b",
+            "ma_a",
+            "ma_c",
+            "leverage"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 2.47,
+          "warnings": 0
+        },
+        {
+          "id": "q10",
+          "category": "stale_vs_current",
+          "query": "最大回撤 计算口径",
+          "expected": [
+            "current_drawdown"
+          ],
+          "top": [
+            "current_drawdown",
+            "drawdown",
+            "mixed",
+            "sharpe",
+            "stale_drawdown"
+          ],
+          "rank": 1,
+          "recall": 1,
+          "mrr": 1,
+          "ndcg": 1,
+          "latency_ms": 3.08,
+          "warnings": 0
+        },
+        {
+          "id": "q11",
+          "category": "missing_knowledge",
+          "query": "天气衍生品 定价模型",
+          "expected": [],
+          "top": [
+            "current_drawdown",
+            "sharpe"
+          ],
+          "rank": 3,
+          "recall": 0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0,
+          "latency_ms": 1.99,
+          "warnings": 0
+        }
+      ]
+    }
+  }
+}

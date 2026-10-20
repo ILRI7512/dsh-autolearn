@@ -138,6 +138,14 @@ export class AutolearnEngine {
         return this.hostApproval;
     }
     /**
+     * 仅在 DSH 适配层成功注册 `tools/pre-execute` 审批 hook 后调用。
+     * 没有 hook 就开启委托，等于把 destructive 自动放行（vNext 审计 SEC-09）。
+     */
+    enableHostApproval() {
+        this.permissions.setDelegateToHost(true);
+        this.hostApproval = true;
+    }
+    /**
      * 宿主设置卡热生效：模式与每日预算在每轮开始时重读（与旧版行为一致）。
      * 只接受白名单键，非法值被忽略；dataDir 变更仍需重启（数据库已打开）。
      */

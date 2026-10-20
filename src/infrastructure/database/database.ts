@@ -27,6 +27,14 @@ export type Row = Record<string, unknown>
 
 const BOOL_SET = new Set(BOOL_COLUMNS.map(([table, column]) => `${table}.${column}`))
 
+/** JSON 列中语义为数组的列：坏 JSON/`null` 时退化为 []，其余退化为 {}。 */
+const ARRAY_JSON_COLUMNS = new Set([
+  'projects.partitions', 'projects.acceptance_criteria', 'projects.deliverables',
+  'projects.allowed_sources', 'tasks.steps', 'tasks.depends_on', 'tasks.acceptance',
+  'chunks.verification_evidence', 'chunks.tags', 'verification_records.evidence',
+  'conflicts.evidence',
+])
+
 function columnsOf(table: string): readonly string[] {
   const columns = COLUMNS[table]
   if (!columns) throw new StorageError(`未知表: ${table}`)
@@ -172,9 +180,20 @@ export class Database {
       if (!(column in out)) continue
       const raw = out[column]
       if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) continue
-      // 损坏的 JSON 退化为空容器（旧版退化为 None）；避免类型化读取时崩溃。
+      // 先按 JSON 解析，再按**解析后的类型**决定形状：
+      // 之前的实现用 "文本里是否包含 {" 猜测对象/数组，导致
+      // `[{...}]` 这类对象数组被错误解码成 {}（vNext 审计 D-01）。
       const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
-      out[column] = text.includes('{') ? parseJsonObject(text) : parseJsonArray(text)
+      const fallback = ARRAY_JSON_COLUMNS.has(`${table}.${column}`)
+        ? parseJsonArray(text)
+        : parseJsonObject(text)
+      try {
+        const parsed: unknown = JSON.parse(text)
+        out[column] = parsed === null || parsed === undefined ? fallback : parsed
+      } catch {
+        // 损坏的 JSON 退化为与列语义一致的空容器，避免类型化读取崩溃。
+        out[column] = fallback
+      }
     }
     for (const [t, column] of BOOL_COLUMNS) {
       if (t !== table || !(column in out)) continue
