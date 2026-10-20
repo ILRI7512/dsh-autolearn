@@ -7,7 +7,8 @@
       config:
         serverName: autolearn
         transport: stdio
-        command: !!js process.env.DSH_AL_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+        # 注意：!!js 里含三元运算符的 ': ' 必须整体加引号，否则 YAML 解析失败、整个 bundle 不加载
+        command: !!js "process.env.DSH_AL_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')"
         args:
           - '-m'
           - 'dsh_autonomous_learning.plugin'

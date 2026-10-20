@@ -15,5 +15,6 @@ console.log("readback:", JSON.stringify(readSettings()))
 console.log("invalid mode:", writeSettings({ mode: "yolo" }).error)
 console.log("invalid budget:", writeSettings({ dailyBudgetUsd: -1 }).error)
 console.log("relative dir:", writeSettings({ dataDir: "relative/path" }).error)
-console.log("abs dir:", writeSettings({ dataDir: "D:/tmp/al-data" }).settings.dataDir)
+// 用当前平台的绝对路径，避免 Windows 盘符写法在 POSIX 上被判为相对路径
+console.log("abs dir:", writeSettings({ dataDir: join(tmpdir(), "al-data") }).settings.dataDir)
 rmSync(dir, { recursive: true, force: true })
