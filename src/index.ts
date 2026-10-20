@@ -29,6 +29,7 @@ import { ApprovalService } from './security/approval.ts'
 import { PathPolicy } from './security/paths.ts'
 import { PermissionManager } from './security/permissions.ts'
 import { describeNetworkPolicy, type NetworkPolicyOptions } from './security/network.ts'
+import { describeSandbox } from './security/sandbox.ts'
 import { ensurePartitionAllowed, describePartitions } from './domain/knowledge/domains.ts'
 import { AutolearnServices } from './application/services.ts'
 
@@ -49,6 +50,7 @@ export interface EngineDiagnostics {
   config: Record<string, unknown>
   permissions: Record<string, unknown>
   network: Record<string, unknown>
+  execution: Record<string, unknown>
   storage: Record<string, unknown>
   integrity: Record<string, unknown>
   index: Record<string, unknown>
@@ -126,6 +128,9 @@ export class AutolearnEngine {
       maxOutputBytes: config.security.max_output_bytes,
       experimentsDir: config.paths.experiments_dir,
       pathPolicy: this.pathPolicy,
+      sandboxMode: config.security.exec_sandbox,
+      memoryMb: config.security.exec_memory_mb,
+      artifactMb: config.security.exec_artifact_mb,
     })
     this.report = new ReportGenerator({
       db: this.db, repo: this.repo, evaluator: this.evaluator, gaps: this.gaps,
@@ -233,6 +238,7 @@ export class AutolearnEngine {
         pending_confirmations: this.approval.pending().length,
       },
       network: describeNetworkPolicy(this.networkOptions()),
+      execution: describeSandbox(),
       storage: { ...storage, counts: storage },
       integrity,
       index: this.index.stats(),

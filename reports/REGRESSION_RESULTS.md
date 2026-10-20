@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 类型检查 | `tsc -p tsconfig.json --typeRoots …` | **0 error** |
 | 构建 | `tsc -p tsconfig.build.json` | 成功（`dist/` 与 src 同步） |
-| 全量测试 | `npm test` | **162 tests / 39 suites / 0 fail / 21.6s** |
+| 全量测试 | `npm test` | **171 tests / 42 suites / 0 fail / 31.5s** |
 | legacy Python | `pytest dsh_autonomous_learning/tests -q` | **197 passed / 23.4s** |
 | 检索评测 | `node scripts/retrieval-eval.ts` | `reports/retrieval-eval.json` |
 | 性能基准 | `node scripts/performance-bench.ts` | `reports/performance-benchmark.json` |
@@ -21,7 +21,7 @@
 
 | 指标 | 修复前 | 修复后 |
 | --- | --- | --- |
-| TS 测试数 | 148 | **162**（+14：6 vNext + 6 HTTP + 2 注入） |
+| TS 测试数 | 148 | **171**（+23：6 vNext + 6 HTTP + 2 注入 + 9 沙盒） |
 | 失败数 | 0 | 0 |
 | 新增回归缺陷 | — | 6 个闭环缺陷先失败后通过 |
 | `findDuplicates` 800 条 | 4,229 ms | **309 ms** |
@@ -29,6 +29,7 @@
 | hybrid nDCG | 0.842 | **0.876** |
 | 旧库兼容 | 通过 | 通过（未改 schema/索引格式） |
 | 依赖 | 0 运行时外部包 | 0（未新增） |
+| 代码执行隔离 | 仅进程级 | strict 沙盒（降权+netns+Permission Model） |
 
 ## 3. 新增测试的“先失败”证据
 
@@ -44,6 +45,8 @@
 ```
 
 修复后同一文件 6/6 通过（新增时效排序用例）。
+
+沙盒用例首次运行即 9/9 通过；另有 process 模式测试证明显式降级确实无沙盒（可读 `/etc/passwd`），避免“配置写了但没生效”。
 
 ## 4. 回归范围说明
 

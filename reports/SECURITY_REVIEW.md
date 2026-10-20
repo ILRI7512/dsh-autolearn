@@ -52,12 +52,14 @@
 | 失败关闭 | hook 判定异常 → ask；无 hook → 本地确认 | vnext-fixes |
 | 数据隔离 | 无项目作用域只返回 global；向量/倒排均按 allowedIds | knowledge.test（跨项目） |
 
-## 3. 代码执行边界（不是沙箱）
+## 3. 代码执行沙盒（strict 默认）
 
-- 仅 **lab 模式**、仅 **JavaScript**；`spawn(node)`，不使用 shell。
-- cwd 限定 `data/experiments/<id>`；env 白名单（PATH/HOME/LANG/TMPDIR/TZ/NODE_PATH），不继承 API Key。
-- 超时 SIGKILL；stdout/stderr 截断；产物目录保留。
-- **明确声明**：进程级隔离，不是容器/内核级沙箱；恶意代码仍可能读写当前用户可访问的文件。生产使用需外层沙箱。
+- 仅 **lab 模式**、仅 **JavaScript**；默认 `security.exec_sandbox="strict"`。
+- 三层隔离：降权 `nobody(65534)` + `unshare -n` 网络命名空间 + Node `--permission`（只允许读写产物目录；未开启 child_process/worker/addons/inspector）。
+- 超时杀整个进程组；输出截断；`--max-old-space-size`；产物目录软上限。
+- 能力不足（缺少 unshare/setpriv 或 Node 不支持 Permission Model）时**失败关闭**，不会静默退回无隔离执行；`process` 必须显式配置，并在结果中标记 `process-only`。
+- **边界**：不是 seccomp/LSM 内核沙箱，也不是容器；共享内核与文件系统视图，主要依赖运行时权限模型与 uid/命名空间。
+- 证据：`tests/security/sandbox.test.ts` 9 项通过；逃逸探针中读 `/etc/passwd`、写 `/tmp`、`child_process`、网络全部被拒绝，产物目录内写入允许；超时 1s 内终止；2MB 产物超过 1MB 上限判失败。详见 `SANDBOX_IMPLEMENTATION.md`。
 
 ## 4. Prompt Injection / 不可信资料
 
@@ -74,7 +76,7 @@
 | `allow_private_networks` | 显式开启后允许内网抓取（含 169.254） | 生产保持 false；开启时配合域名白名单 |
 | 密钥扫描是启发式 | 正则无法覆盖全部格式 | 不把密钥作为知识内容；日志已脱敏 |
 | 审计 detail 截断 | 大对象会截断/脱敏 | 需要完整取证时用数据库行 + 受控导出 |
-| 代码执行非沙箱 | 见 §3 | 外层沙箱/容器；不要执行不可信代码 |
+| 沙盒不是内核级 | 见 §3 | 生产仍建议外层容器/cgroup；不要执行不可信代码 |
 | MCP 双入口 | 默认关闭；同时开启可能并发写 | 二选一；MCP 只读/低频使用 |
 | 根目录 `/` 作为 allowed_root | `PathPolicy` 的字符串前缀判断对 `/` 有边角问题 | 不要配置 `/` 为允许根（P3） |
 

@@ -81,9 +81,23 @@
 - 修复后：全部通过；超时返回“请求超时”。
 - 回滚：git revert；无数据变更。
 
-## 9. 文档更新
+## 9. 代码执行沙盒（SANDBOX-01）
 
-- `README.md`：测试数量 148 → 162；说明本轮新增 reports/ 与脚本入口（保持简短）。
+- 文件：`src/security/sandbox.ts`（新增）、`src/domain/practice/runner.ts`、`src/core/config.ts`、`src/index.ts`
+- 改动：
+  - strict 默认：`setpriv`（root）降权 nobody → `unshare -n` 网络命名空间 → `node --permission --allow-fs-read/write=<artifact>`；
+  - 未开启 child_process/worker/addons/inspector；`HOME/TMPDIR` 指向产物目录；env 白名单；
+  - 超时杀进程组；`--max-old-space-size`；产物目录软上限 `exec_artifact_mb`；
+  - 能力探测（实际跑临时脚本）+ 能力不足失败关闭；`process` 需显式配置并标记 process-only；
+  - `systemDiagnostics().execution` 暴露能力与边界。
+- 测试：`tests/security/sandbox.test.ts` 9 项（逃逸/超时/配额/计划/失败关闭/诊断）。
+- 修复前：README/实现均声明“仅进程级隔离”，无文件/网络限制。
+- 修复后：读 `/etc/passwd`、写 `/tmp`、`child_process`、网络全部拒绝；产物目录内写入允许；死循环 1s 内终止。
+- 回滚：删除新增文件/还原 runner；或把 `security.exec_sandbox` 设为 `process` 显式降级。
+
+## 10. 文档更新
+
+- `README.md`：测试数量 148 → 171（含沙盒）；安全默认值表加入代码执行沙盒；说明 reports/ 与脚本入口。
 - 新增：`reports/` 12 份报告；`scripts/retrieval-eval.ts`、`scripts/performance-bench.ts`；3 个测试文件。
 - 历史文档（`docs/refactor/phase-report.md`）中的 148 是当时快照，保留不篡改。
 
@@ -91,8 +105,8 @@
 
 ## 本轮变更文件（src/tests/scripts/docs）
 
-- src：`security/network.ts`、`security/permissions.ts`、`adapters/dsh/plugin.ts`、`infrastructure/database/database.ts`、`infrastructure/embeddings/vector-index.ts`、`domain/knowledge/store.ts`、`domain/learning/verifier.ts`、`index.ts`
-- tests：`tests/regression/vnext-fixes.test.ts`、`tests/security/http-guard.test.ts`、`tests/security/prompt-injection.test.ts`
+- src：`security/network.ts`、`security/permissions.ts`、`security/sandbox.ts`、`adapters/dsh/plugin.ts`、`infrastructure/database/database.ts`、`infrastructure/embeddings/vector-index.ts`、`domain/knowledge/store.ts`、`domain/learning/verifier.ts`、`domain/practice/runner.ts`、`core/config.ts`、`index.ts`
+- tests：`tests/regression/vnext-fixes.test.ts`、`tests/security/http-guard.test.ts`、`tests/security/prompt-injection.test.ts`、`tests/security/sandbox.test.ts`
 - scripts：`scripts/retrieval-eval.ts`、`scripts/performance-bench.ts`
 - docs/reports：本目录 12 份
 - dist：重新构建（与 src 同步）

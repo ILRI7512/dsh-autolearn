@@ -15,6 +15,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | SEC-11 | JSON 对象数组解码成 `{}` | `infrastructure/database/database.ts` | 探针：evidence 读回 `{}` | 证据/标签结构损坏，质量与核验判断失真 | 按 JSON 实际类型解码 | fixed |
 | LEARN-01 | 交叉来源永不生效 | `verifier.ts` + `store.findDuplicates` | 探针：两条独立来源仍 independence=1 | fact 类无法升级，证据链断裂 | 作用域内批量相似对 + 正确选另一侧 | fixed |
+| SANDBOX-01 | 代码执行仅有进程隔离 | `practice/runner.ts` | 旧实现无文件/网络限制 | 不可信代码可读写宿主文件、联网 | 降权 + netns + Node Permission Model；能力不足失败关闭 | fixed |
 
 ## P2 — 一致性 / 性能
 
@@ -34,6 +35,7 @@
 | LEARN-02 | 未标记文档被首个主题取走 | `orchestrator.taskExtract` | 5 主题 1 文档 → 仅 1 主题产出 | 设计主题分配/文档多主题策略 | open |
 | LEARN-03 | 公式练习必然跳过 | `practice/generator.ts` | spec `expected: null` | 引入变量/期望值来源，或明确人工判分流程 | open |
 | SEC-13 | 允许根为 `/` 时前缀判断边角 | `security/paths.ts` | 代码审查 | 规范化根为 `/` 的特判 | open |
+| SEC-14 | 沙盒依赖宿主工具 | `security/sandbox.ts` | 能力探测 | 缺少 unshare/setpriv 时失败关闭；无内核级隔离 | open（设计边界） |
 | ARCH-01 | 冲突检测内嵌在服务门面 | `application/services.ts` | 665 行，含 ~120 行领域逻辑 | 迁到 `domain/knowledge/conflicts.ts` | open |
 | TEST-01 | 无 10+ 进程并发/磁盘满/长稳测试 | tests | 未执行 | 需要独立故障注入环境 | open |
 | DOC-01 | README 测试数字随修复变化 | `README.md` | 148 → 162 | 本轮已更新 | fixed |

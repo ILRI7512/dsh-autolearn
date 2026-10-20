@@ -8,7 +8,7 @@
 > - 11 个 DSH 原生工具（由 60 个 MCP 工具收敛而来）+ 1 个用户侧 CLI；
 > - 保留可选 MCP 适配器（默认关闭，调用同一引擎）；
 > - 数据库 schema 与 v1.2 完全兼容（v7），旧知识库可直接打开；
-> - 测试：**162 项 node:test 全过**；旧 Python 实现保留为 legacy（197 项 pytest 仍可跑）。
+> - 测试：**171 项 node:test 全过**；旧 Python 实现保留为 legacy（197 项 pytest 仍可跑）。
 - 审计/评测/性能基线：`reports/`（含 12 份报告与原始 JSON），可重复脚本见 `scripts/`。
 >
 > 详细审计、依赖地图、迁移状态与实测数据见 `docs/refactor/`。
@@ -165,16 +165,17 @@ MCP 客户端配置示例：
 | 审批失败 | **失败关闭** | 判定异常 → ask，不自动放行 |
 | 证据 | 无证据一律 fail | 观点/假设/未解决问题永远不能 verified；模型不能自称人工复核 |
 | 检索作用域 | 无 project 作用域时只返回 `visibility='global'` | 防跨项目泄漏 |
+| 代码执行 | **strict 沙盒** | 降权 nobody + `unshare -n` 网络命名空间 + Node `--permission`（仅产物目录可读写，禁 child_process/worker/addons）；能力不足时失败关闭，`process` 需显式配置 |
 
 ## 测试
 
 ```bash
-npm test             # 162 tests / 39 suites（node:test）
+npm test             # 171 tests / 42 suites（node:test）
 npm run typecheck    # strict TS
 python3 -m pytest dsh_autonomous_learning/tests -q   # legacy 基线：197 passed
 ```
 
-覆盖：类型检查、单元、数据库集成、知识与全文检索、向量/索引一致性、版本回滚、任务恢复、预算、权限、审批拒绝、SSRF（含 IPv6）、路径穿越、跨项目隔离、并发写、备份恢复、DSH 工具注册/卸载、MCP 真实子进程、CLI 审批、旧库兼容、本地 HTTP 抓取策略、Prompt Injection。
+覆盖：类型检查、单元、数据库集成、知识与全文检索、向量/索引一致性、版本回滚、任务恢复、预算、权限、审批拒绝、SSRF（含 IPv6）、路径穿越、跨项目隔离、并发写、备份恢复、DSH 工具注册/卸载、MCP 真实子进程、CLI 审批、旧库兼容、本地 HTTP 抓取策略、Prompt Injection、代码执行沙盒逃逸/超时/配额。
 
 ## 故障恢复
 
@@ -191,7 +192,7 @@ python3 -m pytest dsh_autonomous_learning/tests -q   # legacy 基线：197 passe
 
 1. **PDF/DOCX 解析未迁移**：会明确报错并建议转换为 Markdown/TXT；HTML 用正则清洗（非 DOM）。
 2. **模型辅助（规划/抽取提议）未迁移**：`use_model=true` 会返回明确警告，只走规则链路。
-3. **代码执行只支持 JavaScript**，仅 lab 模式、进程级隔离（不是安全沙箱）；Python 代码执行已移除。
+3. **代码执行只支持 JavaScript**，仅 lab 模式；默认 strict 沙盒（权限 + 命名空间 + Permission Model），但**不是 seccomp/LSM 内核沙箱**；`security.exec_sandbox=process` 是显式降级。Python 代码执行已移除。
 4. **调度 tick / 实验运行器 / 知识图谱查询 / 检索评测集**未迁移（表结构保留）。
 5. 哈希向量是**词汇级**召回，不是语义模型；未做检索质量评测，不宣称提升。
 6. 真实 DSH profile 启动验证被缺失模型凭据阻塞；插件注册由契约级测试 + MCP 子进程验证覆盖。

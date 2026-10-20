@@ -41,7 +41,9 @@ function defaults() {
         security: {
             allowed_roots: [], allow_network: false, allowed_domains: [],
             max_download_bytes: 8 * 1024 * 1024, max_output_bytes: 64 * 1024,
-            exec_timeout_s: 10, exec_memory_mb: 512, audit_log: true,
+            exec_timeout_s: 10, exec_memory_mb: 512,
+            exec_sandbox: 'strict', exec_artifact_mb: 16,
+            audit_log: true,
             block_secret_patterns: true, delegate_approval_to_host: false,
             allow_private_networks: false, max_redirects: 5,
             allowed_content_types: [
@@ -232,6 +234,12 @@ export function validateConfig(cfg, env = process.env) {
     }
     if (cfg.security.exec_timeout_s <= 0)
         throw configError('security.exec_timeout_s 必须为正数');
+    if (!['strict', 'process'].includes(cfg.security.exec_sandbox)) {
+        throw configError('security.exec_sandbox 必须是 strict 或 process');
+    }
+    if (!Number.isFinite(cfg.security.exec_artifact_mb) || cfg.security.exec_artifact_mb <= 0) {
+        throw configError('security.exec_artifact_mb 必须为正数');
+    }
     if (cfg.security.max_redirects < 0 || cfg.security.max_redirects > 20) {
         throw configError('security.max_redirects 必须在 0..20 之间');
     }

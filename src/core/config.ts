@@ -86,6 +86,10 @@ export interface SecurityConfig {
   max_output_bytes: number
   exec_timeout_s: number
   exec_memory_mb: number
+  /** strict = 降权 + 网络命名空间 + Node 权限模型；process = 仅进程隔离（显式选择）。 */
+  exec_sandbox: 'strict' | 'process'
+  /** 单次执行产物目录的软上限（MB），超出判失败。 */
+  exec_artifact_mb: number
   audit_log: boolean
   block_secret_patterns: boolean
   delegate_approval_to_host: boolean
@@ -159,7 +163,9 @@ function defaults(): Config {
     security: {
       allowed_roots: [], allow_network: false, allowed_domains: [],
       max_download_bytes: 8 * 1024 * 1024, max_output_bytes: 64 * 1024,
-      exec_timeout_s: 10, exec_memory_mb: 512, audit_log: true,
+      exec_timeout_s: 10, exec_memory_mb: 512,
+      exec_sandbox: 'strict', exec_artifact_mb: 16,
+      audit_log: true,
       block_secret_patterns: true, delegate_approval_to_host: false,
       allow_private_networks: false, max_redirects: 5,
       allowed_content_types: [
@@ -345,6 +351,12 @@ export function validateConfig(cfg: Config, env: NodeJS.ProcessEnv = process.env
     throw configError('learning.chunk_overlap 必须小于 chunk_size')
   }
   if (cfg.security.exec_timeout_s <= 0) throw configError('security.exec_timeout_s 必须为正数')
+  if (!['strict', 'process'].includes(cfg.security.exec_sandbox)) {
+    throw configError('security.exec_sandbox 必须是 strict 或 process')
+  }
+  if (!Number.isFinite(cfg.security.exec_artifact_mb) || cfg.security.exec_artifact_mb <= 0) {
+    throw configError('security.exec_artifact_mb 必须为正数')
+  }
   if (cfg.security.max_redirects < 0 || cfg.security.max_redirects > 20) {
     throw configError('security.max_redirects 必须在 0..20 之间')
   }

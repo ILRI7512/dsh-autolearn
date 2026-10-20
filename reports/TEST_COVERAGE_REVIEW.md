@@ -6,11 +6,11 @@
 | --- | --- | --- | --- |
 | `tests/unit` | 7 | 分词/BM25、BLAKE2b/向量、NPY、配置、校验、状态机、公式/解析、预算 | 58+ |
 | `tests/integration` | 6 | 数据库/迁移/事务/备份、知识 CRUD/检索/版本/去重/隔离、学习闭环、适配器、CLI、诊断 | 60+ |
-| `tests/security` | 4 | SSRF/路径/审批、核验规则、本地 HTTP 真实抓取、Prompt Injection | 40+ |
+| `tests/security` | 5 | SSRF/路径/审批、核验规则、本地 HTTP 真实抓取、Prompt Injection、代码执行沙盒 | 49+ |
 | `tests/regression` | 2 | 旧库兼容/向量对拍、vNext 缺陷回归 | 9 |
-| **合计** | **19 文件 / 39 suites** | | **162 tests / 0 fail** |
+| **合计** | **20 文件 / 42 suites** | | **171 tests / 0 fail** |
 
-运行：`npm test`（node:test，串行，~21.6s）。
+运行：`npm test`（node:test，串行，~31.5s；沙盒用例包含真实命名空间启动）。
 
 ## 2. 覆盖映射（对任务要求的 10 类）
 
@@ -20,7 +20,7 @@
 | 集成测试 | 有 | database/knowledge/learning/adapters/cli/diagnostics |
 | 插件契约测试 | 有 | adapters.test：真实 ctx 形状注册/ask/卸载；MCP 真实子进程 |
 | 数据持久化 | 有 | schema 迁移、事务回滚、备份/恢复、版本回滚、并发连接 |
-| 故障注入 | 部分 | 失败任务重试/阻塞、恢复、预算超限、损坏备份、坏 JSON、HTTP 超时/超限；无磁盘满/断电 |
+| 故障注入 | 部分 | 失败任务重试/阻塞、恢复、预算超限、损坏备份、坏 JSON、HTTP 超时/超限、沙盒超时/配额；无磁盘满/断电 |
 | 并发 | 部分 | 2 连接写入；无 10+ 进程压力 |
 | 安全 | 有 | SSRF（v4/v6）、路径穿越、符号链接、审批、密钥、注入 |
 | 回归 | 有 | 旧库真实数据 + 本轮 6 个缺陷 |
@@ -48,6 +48,7 @@
 | `tests/regression/vnext-fixes.test.ts` | JSON 数组解码、IPv6 绕过、无 hook 放行、交叉来源、标题向量、时效排序 |
 | `tests/security/http-guard.test.ts` | 重定向/循环、体积上限、content-type、总超时、DNS 钉死 |
 | `tests/security/prompt-injection.test.ts` | 注入文本只作为数据、密钥不落库 |
+| `tests/security/sandbox.test.ts` | 文件/子进程/网络逃逸、超时、产物配额、失败关闭 |
 
 ## 5. 未覆盖 / 建议后续补
 

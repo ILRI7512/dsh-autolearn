@@ -29,6 +29,7 @@ import { ApprovalService } from "./security/approval.js";
 import { PathPolicy } from "./security/paths.js";
 import { PermissionManager } from "./security/permissions.js";
 import { describeNetworkPolicy } from "./security/network.js";
+import { describeSandbox } from "./security/sandbox.js";
 import { ensurePartitionAllowed, describePartitions } from "./domain/knowledge/domains.js";
 import { AutolearnServices } from "./application/services.js";
 export class AutolearnEngine {
@@ -97,6 +98,9 @@ export class AutolearnEngine {
             maxOutputBytes: config.security.max_output_bytes,
             experimentsDir: config.paths.experiments_dir,
             pathPolicy: this.pathPolicy,
+            sandboxMode: config.security.exec_sandbox,
+            memoryMb: config.security.exec_memory_mb,
+            artifactMb: config.security.exec_artifact_mb,
         });
         this.report = new ReportGenerator({
             db: this.db, repo: this.repo, evaluator: this.evaluator, gaps: this.gaps,
@@ -198,6 +202,7 @@ export class AutolearnEngine {
                 pending_confirmations: this.approval.pending().length,
             },
             network: describeNetworkPolicy(this.networkOptions()),
+            execution: describeSandbox(),
             storage: { ...storage, counts: storage },
             integrity,
             index: this.index.stats(),

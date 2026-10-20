@@ -26,7 +26,7 @@
 | 16 | 交叉来源自动收集 | 同上 | verifier.enrichEvidence + store.findDuplicates | verifier | 同主题相近片段 → 第 2 条独立来源 | 无候选时保持 partial | vnext-fixes | fixed |
 | 17 | 公式重算 | `knowledge_verify(verify_formula)` | `practice/formula.ts` | verifier | 表达式+变量+期望 → pass/fail | 未知变量/函数/除零明确失败 | parser-formula | verified |
 | 18 | 练习任务生成 | `learning_run(practice)` | `practice/generator.ts` | orchestrator | 已核验知识 → 公式/代码/自测任务 | 不可判分类型明确跳过 | 手工探针 | partial |
-| 19 | 受限代码执行 | lab 模式 practice | `practice/runner.ts` | orchestrator | JS 代码 → 退出码/输出/产物 | 超时 kill、输出截断、语言拒绝 | 无自动化（lab 需审批） | partial（仅 JS，非沙箱） |
+| 19 | 受限代码执行 | lab 模式 practice | `practice/runner.ts` + `security/sandbox.ts` | orchestrator | JS 代码 → 退出码/输出/产物 | 超时杀进程组、输出截断、沙盒能力不足失败关闭、产物配额 | sandbox.test（9） | verified（仅 JS；strict 沙盒） |
 | 20 | 缺口分析 | `learning_run(gap_analysis)` / status | `learning/gaps.ts` | orchestrator、evaluator | 项目 → 覆盖率/缺口 | 空主题 coverage=[] | learning.test 间接 | verified |
 | 21 | 学习评估与报告 | `learning_evaluate` | `evaluator.ts` / `report.ts` | 服务层 | 项目 → 指标/未达标 + md/json | 空库明确未达标 | learning.test | verified |
 | 22 | 失败重试/阻塞/恢复 | `learning_run` | orchestrator/repository | 内部 | 任务失败 → retrying/failed + 阻塞依赖 | 次数上限；`recover` 超时 | learning.test | verified |
