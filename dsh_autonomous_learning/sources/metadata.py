@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..core.models import FreshnessStatus, LicenseStatus, SourceType
 
@@ -208,6 +209,33 @@ def extract_publisher(location: str, title: str = "") -> str:
     if parsed.netloc:
         return parsed.netloc.lower()
     return ""
+
+
+def normalize_location(location: str) -> str:
+    """来源稳定标识：URL 去跟踪参数/片段/末尾斜杠，本地路径取 realpath。
+
+    去重、增量判断、条件请求都依赖这个"同一来源只有一个 key"。
+    """
+
+    value = (location or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        tracking = {
+            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+            "spm", "from", "ref", "fbclid", "gclid",
+        }
+        query = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=False) if k.lower() not in tracking]
+        path = parsed.path.rstrip("/") or "/"
+        return urlunparse(
+            (parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.params, urlencode(query), "")
+        )
+    path = Path(value).expanduser()
+    try:
+        return str(path.resolve())
+    except OSError:  # pragma: no cover - 依赖文件系统
+        return str(path)
 
 
 def describe_source(

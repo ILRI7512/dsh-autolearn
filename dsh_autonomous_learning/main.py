@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .domains import domain_keys
 from .config import load_config
 from .core.models import utcnow_iso
 from .core.orchestrator import build_runtime
@@ -245,8 +246,14 @@ def cmd_confirmations(args: argparse.Namespace) -> int:
             print(_json({"pending": runtime.permissions.pending_confirmations()}))
             return 0
         if args.action == "approve":
-            ok = runtime.permissions.approve(args.token)
-            print(_json({"approved": ok, "token": args.token}))
+            ok = runtime.permissions.approve(args.token, require_tty=True)
+            if not ok and not sys.stdin.isatty():
+                print(
+                    "拒绝：批准高风险操作必须在交互终端中执行（非 TTY 环境一律失败）。",
+                    file=sys.stderr,
+                )
+                return 3
+            print(_json({"approved": ok}))
             return 0 if ok else 2
         if args.action == "reject":
             ok = runtime.permissions.reject(args.token, args.note or "")
@@ -305,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("project-create", help="创建学习项目")
     p.add_argument("--goal", required=True)
     p.add_argument("--title", default="")
-    p.add_argument("--domain", default="general", choices=["general", "uiux", "finance", "quant", "programming", "project", "experiment"])
+    p.add_argument("--domain", default="general", choices=domain_keys())
     p.add_argument("--depth", default="working", choices=["overview", "working", "deep"])
     p.add_argument("--source", action="append", help="允许的数据源（可多次）")
     p.add_argument("--plan", action="store_true", help="立即生成计划")

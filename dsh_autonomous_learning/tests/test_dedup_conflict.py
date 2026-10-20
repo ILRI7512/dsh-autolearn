@@ -8,14 +8,20 @@ from dsh_autonomous_learning.storage.metadata_store import ChunkFilter
 from .conftest import make_chunk
 
 
-def test_exact_duplicate_detected(runtime):
+def test_exact_duplicate_is_registered_and_not_stored_twice(runtime):
+    """完全重复的内容：只保留一个活跃实体，重复关系在写入时即登记。"""
+
     text = "滑点是指成交价与预期价的差额，回测必须计入滑点。"
     make_chunk(runtime, chunk_id="c1", content=text)
-    make_chunk(runtime, chunk_id="c2", content=text)
-    report = runtime.dedup.find_and_record(chunk_id="c1")
-    assert report["exact_duplicates"]
-    assert report["recorded"] >= 1
-    assert runtime.metadata.list_duplicates("prj_test")
+    result = runtime.store.add_chunks(
+        [{"chunk_id": "c2", "project_id": "prj_test", "title": "滑点", "content": text}]
+    )
+    assert result["skipped"], "同内容不应重复落库"
+    assert runtime.metadata.get_chunk("c2") is None
+    assert runtime.metadata.get_chunk("c1") is not None
+    rows = runtime.metadata.list_duplicates("prj_test")
+    assert rows, "重复关系必须落库"
+    assert {rows[0]["chunk_a"], rows[0]["chunk_b"]} == {"c1", "c2"}
 
 
 def test_near_duplicate_detected(runtime):
@@ -68,12 +74,17 @@ def test_conflict_resolution_marks_both(runtime):
     assert updated["resolution"]
 
 
-def test_duplicates_not_auto_deleted(runtime):
-    text = "完全相同的知识内容，用于验证重复检测不会自动删除。"
-    make_chunk(runtime, chunk_id="c1", content=text)
+def test_duplicate_submission_does_not_delete_or_overwrite(runtime):
+    """重复提交既不会删掉已存在的知识，也不会覆盖它（只是不新增第二份）。"""
+
+    text = "完全相同的知识内容，用于验证重复提交不会破坏已有实体。"
+    make_chunk(runtime, chunk_id="c1", content=text, status="verified")
+    before = runtime.metadata.get_chunk("c1")
     make_chunk(runtime, chunk_id="c2", content=text)
-    report = runtime.dedup.find_and_record(chunk_id="c1")
-    assert report["recorded"] >= 1
+
     assert runtime.metadata.get_chunk("c1") is not None
-    assert runtime.metadata.get_chunk("c2") is not None
-    assert runtime.metadata.count_chunks(ChunkFilter(project_id="prj_test")) == 2
+    after = runtime.metadata.get_chunk("c1")
+    assert after["status"] == before["status"] == "verified"
+    assert after["content_hash"] == before["content_hash"]
+    assert runtime.metadata.count_chunks(ChunkFilter(project_id="prj_test")) == 1
+    assert runtime.metadata.list_duplicates("prj_test")

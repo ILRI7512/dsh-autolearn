@@ -29,6 +29,8 @@ from ..core.models import (
     SourceType,
     stable_hash,
     utcnow_iso,
+    content_fingerprint,
+    make_chunk_id,
 )
 from ..sources.parser import chunk_text, detect_language, extract_code_blocks, split_sections, summarize
 from . import classifier as classification
@@ -92,10 +94,47 @@ class KnowledgeDraft:
     freshness_status: str = FreshnessStatus.UNKNOWN.value
     license_status: str = LicenseStatus.UNKNOWN.value
     visibility: str = "global"
+    tags: List[str] = field(default_factory=list)
+    source_version: str = ""
+    source_excerpt: str = ""
+    core_principle: str = ""
+    reasoning: str = ""
+    application: str = ""
+    implementation: str = ""
+    anti_patterns: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_row(self) -> Dict[str, Any]:
         return dict(self.__dict__)
+
+
+def _derive_tags(
+    text: str,
+    concepts: Sequence[Mapping[str, Any]],
+    formulas: Sequence[Mapping[str, Any]],
+    codes: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """从抽取结果里推导标签：概念名 + 结构化类型标记 + 少量关键词。"""
+
+    tags: List[str] = []
+    for item in list(concepts)[:6]:
+        name = str((item or {}).get("term") or "").strip()
+        if name and len(name) <= 24:
+            tags.append(name)
+    if formulas:
+        tags.append("含公式")
+    if codes:
+        tags.append("含代码")
+    for keyword in ("滑点", "回测", "夏普", "对比度", "无障碍", "杠杆", "保证金"):
+        if keyword in text:
+            tags.append(keyword)
+    seen = set()
+    unique = []
+    for tag in tags:
+        if tag not in seen:
+            seen.add(tag)
+            unique.append(tag)
+    return unique[:10]
 
 
 def extract_formulas(text: str) -> List[Dict[str, str]]:
@@ -245,6 +284,17 @@ class KnowledgeExtractor:
         for draft in drafts:
             unique.setdefault(draft.content_hash, draft)
         stats.kept = len(unique)
+        if not unique:
+            # 零产出必须显式告警：短文档被 min_chunk_chars 全跳过时，
+            # 历史实现静默返回 0 条，文档仍被打成 extracted（审计 H-02）。
+            if stats.skipped_short:
+                stats.warnings.append(
+                    f"正文被切成 {stats.skipped_short} 段，全部短于 "
+                    f"min_chunk_chars={self.cfg.min_chunk_chars}，未提取到知识；"
+                    "可调小该阈值或补充正文"
+                )
+            else:
+                stats.warnings.append("文档未提取到任何知识单元（内容可能过短或缺少可识别结构）")
         return {
             "drafts": [d.to_row() for d in unique.values()],
             "stats": stats.to_dict(),
@@ -268,10 +318,11 @@ class KnowledgeExtractor:
     ) -> KnowledgeDraft:
         title = section_title.strip() or (chunk.splitlines()[0][:60] if chunk else "未命名知识")
         cls = classification.classify(chunk, title=title, domain=str(project.get("domain") or ""))
-        content_hash = stable_hash(f"{document.get('document_id')}|{chunk}")
-        chunk_id = "chunk_" + stable_hash(
-            f"{project.get('project_id')}|{document.get('document_id')}|{content_hash}", 24
-        )
+        # 内容指纹只由**正文**决定：混入 document_id 会让"同一段文字换个文件"
+        # 变成不同指纹，跨文档去重永远不触发。
+        content_hash = content_fingerprint(chunk)
+        # 知识 ID 也只由"项目 + 内容"决定：同一内容重复入库是同一实体（幂等）。
+        chunk_id = make_chunk_id(str(project.get("project_id") or ""), content_hash)
         formulas = extract_formulas(chunk)
         codes = extract_code_examples(chunk)
         assumptions = identify_assumptions(chunk)
@@ -327,6 +378,12 @@ class KnowledgeExtractor:
             freshness_status=str(document.get("freshness_status") or FreshnessStatus.UNKNOWN.value),
             license_status=str(document.get("license_status") or LicenseStatus.UNKNOWN.value),
             visibility=default_visibility(Partition.PENDING.value),
+            # 规则路径能确定的结构化字段：标签、原文摘录、版本标识。
+            # core_principle / reasoning / application / implementation /
+            # anti_patterns 需要模型或实践环节才能填，这里保持空值（不伪造）。
+            tags=_derive_tags(chunk, concepts, formulas, codes),
+            source_version=str(document.get("source_version") or document.get("parser") or ""),
+            source_excerpt=chunk[:300],
             metadata=metadata,
         )
 
@@ -382,11 +439,11 @@ class KnowledgeExtractor:
             ktype = str(item.get("knowledge_type") or "fact")
             if ktype not in KnowledgeType.values():
                 ktype = KnowledgeType.CONCEPT.value
-            content_hash = stable_hash(f"{document.get('document_id')}|model|{content}")
+            content_hash = content_fingerprint(content)
             cls = classification.classify(content, title=title, domain=str(project.get("domain") or ""))
             drafts.append(
                 KnowledgeDraft(
-                    chunk_id="chunk_" + stable_hash(f"{project.get('project_id')}|model|{content_hash}", 24),
+                    chunk_id=make_chunk_id(str(project.get("project_id") or ""), content_hash),
                     project_id=str(project.get("project_id")),
                     document_id=str(document.get("document_id")),
                     title=title,

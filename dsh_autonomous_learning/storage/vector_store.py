@@ -17,13 +17,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -44,6 +46,26 @@ from .tokenizer import expand_query
 
 INDEX_VERSION = 1
 MANIFEST = "manifest.json"
+
+#: 只在"状态机/核验流程"里才允许修改的字段。
+#: 普通写入（重新提取、重复提交）不得改动它们，否则已验证知识会被静默降级。
+STATE_FIELDS = frozenset(
+    {
+        "status",
+        "level",
+        "verification_status",
+        "verification_method",
+        "verification_evidence",
+        "evidence_count",
+        "evidence_independence",
+        "confidence",
+        "confidence_basis",
+        "invalidated_at",
+        "superseded_by",
+        "version",
+        "created_at",
+    }
+)
 VECTORS = "vectors.npy"
 IDS = "ids.json"
 
@@ -61,8 +83,10 @@ class KnowledgeStore:
         index_dir: str | Path,
         embedder: BaseEmbedder,
         retrieval: Optional[RetrievalConfig] = None,
+        embedding_config: Any = None,
     ) -> None:
         self.metadata = metadata
+        self.embedding_config = embedding_config
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.embedder = embedder
@@ -72,6 +96,48 @@ class KnowledgeStore:
         self._matrix: np.ndarray = np.zeros((0, embedder.dim or 0), dtype=np.float32)
         self._dirty = False
         self._last_error = ""
+        self._lock_error = ""
+        self._load_index()
+
+    @contextmanager
+    def _index_lock(self) -> Iterator[None]:
+        """跨进程索引写锁（POSIX flock；不支持时退化为进程内锁）。"""
+
+        path = self.index_dir / ".index.lock"
+        handle = open(path, "a+", encoding="utf-8")
+        locked = False
+        try:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
+            except OSError as exc:
+                # 某些文件系统（Android /sdcard 的 FUSE、部分网络盘）不支持 flock。
+                # 降级为无锁并在索引清单元数据里留痕，而不是让整个写入失败。
+                self._lock_error = f"flock 不可用，降级为无锁: {exc}"
+            yield
+        finally:
+            if locked:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            handle.close()
+
+    def _sync_from_disk(self) -> None:
+        """写前对齐磁盘上的最新索引，避免多实例互相覆盖（lost update）。"""
+
+        if not self.manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if manifest.get("embedder_id") != self.embedder.embedder_id:
+            return
+        if int(manifest.get("count", -1)) == len(self._ids):
+            return
         self._load_index()
 
     # ------------------------------------------------------------------ #
@@ -164,43 +230,156 @@ class KnowledgeStore:
     # ------------------------------------------------------------------ #
     # 写入
     # ------------------------------------------------------------------ #
+    def _cache_key(self, text: str) -> str:
+        return stable_hash(f"{self.embedder.embedder_id}|{text}")
+
     def _vectorize(self, chunks: Sequence[Mapping[str, Any]]) -> np.ndarray:
-        texts = [_index_text(c) for c in chunks]
-        try:
-            matrix = self.embedder.embed(texts)
-        except EmbeddingError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise KnowledgeStoreError(f"向量化失败: {exc}") from exc
-        matrix = np.asarray(matrix, dtype=np.float32)
-        if matrix.ndim != 2 or matrix.shape[1] != (self.embedder.dim or matrix.shape[1]):
-            raise KnowledgeStoreError("向量化返回的维度不符合预期")
-        if not self.embedder.dim:
-            self.embedder.dim = int(matrix.shape[1])
-        return matrix
+        return self._embed_texts([_index_text(c) for c in chunks])
+
+    def _embed_texts(self, texts: Sequence[str]) -> np.ndarray:
+        """带 embedding 缓存的向量化。
+
+        历史实现每次 add/update/rebuild/search 都重新调用向量器（审计 S-15）；
+        同内容同向量器命中缓存时直接复用，向量器换了则 cache_key 自然不同。
+        """
+
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.embedder.dim or 0), dtype=np.float32)
+        use_cache = bool(getattr(self.embedding_config, "cache", True))
+        keys = [self._cache_key(text) for text in texts]
+        cached = self.metadata.get_embedding_blobs(keys, self.embedder.embedder_id) if use_cache else {}
+        dim = int(self.embedder.dim or 0)
+        matrix = np.zeros((len(texts), dim), dtype=np.float32)
+        missing: List[int] = []
+        for index, key in enumerate(keys):
+            blob = cached.get(key)
+            if not blob:
+                missing.append(index)
+                continue
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if dim and vector.shape[0] != dim:
+                missing.append(index)
+                continue
+            matrix[index] = vector
+        if missing:
+            missing_texts = [texts[i] for i in missing]
+            try:
+                fresh = np.asarray(self.embedder.embed(missing_texts), dtype=np.float32)
+            except EmbeddingError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise KnowledgeStoreError(f"向量化失败: {exc}") from exc
+            if fresh.ndim != 2 or fresh.shape[0] != len(missing_texts):
+                raise KnowledgeStoreError("向量化返回的行数不符合预期")
+            if not dim:
+                dim = int(fresh.shape[1])
+                self.embedder.dim = dim
+                matrix = np.zeros((len(texts), dim), dtype=np.float32)
+            if fresh.shape[1] != dim:
+                raise KnowledgeStoreError("向量化返回的维度不符合预期")
+            matrix[missing] = fresh
+            if use_cache:
+                self.metadata.put_embedding_blobs(
+                    [
+                        {
+                            "cache_key": keys[i],
+                            "embedder_id": self.embedder.embedder_id,
+                            "dim": dim,
+                            "vector": np.asarray(fresh[pos], dtype=np.float32).tobytes(),
+                        }
+                        for pos, i in enumerate(missing)
+                    ]
+                )
+                limit = int(getattr(self.embedding_config, "max_cache_entries", 0) or 0)
+                if limit:
+                    self.metadata.prune_embedding_cache(limit)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return matrix / norms
 
     def add_chunks(self, chunks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-        """批量写入知识片段（幂等：同 chunk_id 覆盖；同内容指纹识别重复）。"""
+        """批量写入知识片段。
+
+        写入语义（v1.2 修正）：
+        - **新片段**：按内容指纹生成，缺省字段用默认值补齐；
+        - **已存在片段**：只写调用方显式给出的非状态字段，状态/核验/版本字段
+          一律保留库内现值。历史实现用 ``Chunk()`` 默认值补齐后整行覆盖，
+          会把 verified/v3 静默打回 pending/v1 且不留快照；
+        - **同内容不同来源**：两条都保留（署名与来源不同），但自动登记到
+          ``duplicates`` 表，不再"只报告不落地"。
+        """
 
         if not chunks:
-            return {"added": 0, "updated": 0, "duplicates": [], "chunks": []}
+            return {"added": 0, "updated": 0, "duplicates": [], "skipped": [], "chunks": []}
         prepared: List[Dict[str, Any]] = []
         seen_content: Dict[str, str] = {}
         duplicates: List[Dict[str, Any]] = []
+        skipped_duplicates: List[Dict[str, Any]] = []
         for raw in chunks:
-            chunk = _coerce_chunk(raw)
-            fp = chunk.get("content_hash") or stable_hash(normalize_text(chunk["content"]))
-            chunk["content_hash"] = fp
+            cid = str(raw.get("chunk_id") or "")
+            existing = self.metadata.get_chunk(cid) if cid else None
+            if existing:
+                chunk = _merge_existing(existing, raw)
+                if _content_changed(existing, raw):
+                    self.metadata.add_version(
+                        {
+                            "id": new_id("ver"),
+                            "chunk_id": cid,
+                            "version": int(existing.get("version", 1)),
+                            "content_hash": existing.get("content_hash", ""),
+                            "content": existing.get("content", ""),
+                            "status": existing.get("status", ""),
+                            "change_reason": "content_changed",
+                            "changed_at": utcnow_iso(),
+                        }
+                    )
+                    # 实质内容变更：旧证据不再适用，必须重新核验（不直接复用 verified）
+                    chunk.update(
+                        {
+                            "version": int(existing.get("version", 1)) + 1,
+                            "status": KnowledgeStatus.PENDING_VERIFICATION.value,
+                            "level": "L2",
+                            "verification_status": "unverified",
+                            "verification_method": "none",
+                            "verification_evidence": [],
+                            "evidence_count": 0,
+                            "evidence_independence": 0,
+                            "confidence": 0.3,
+                            "confidence_basis": "内容已实质变更，历史核验证据不再适用",
+                        }
+                    )
+            else:
+                chunk = _coerce_chunk(raw)
+            text_for_fp = str(chunk.get("content") or (existing or {}).get("content") or "")
+            fp = chunk.get("content_hash") or stable_hash(normalize_text(text_for_fp))
+            if existing and "content" not in chunk:
+                # 只改元数据：沿用库内指纹，不重新计算
+                chunk["content_hash"] = existing.get("content_hash") or fp
+                fp = chunk["content_hash"]
+            else:
+                chunk["content_hash"] = fp
             existing_same = self.metadata.find_chunks_by_hash(fp, chunk.get("project_id"))
-            same_other = [c for c in existing_same if c["chunk_id"] != chunk["chunk_id"]]
-            if same_other or fp in seen_content:
+            same_other = [
+                c for c in existing_same if c["chunk_id"] != chunk["chunk_id"] and not c.get("invalidated_at")
+            ]
+            dup_of = same_other[0]["chunk_id"] if same_other else seen_content.get(fp, "")
+            if dup_of:
                 duplicates.append(
-                    {
-                        "chunk_id": chunk["chunk_id"],
-                        "duplicate_of": (same_other[0]["chunk_id"] if same_other else seen_content[fp]),
-                        "reason": "content_hash",
-                    }
+                    {"chunk_id": chunk["chunk_id"], "duplicate_of": dup_of, "reason": "content_hash"}
                 )
+                self.metadata.record_duplicate(
+                    project_id=str(chunk.get("project_id") or ""),
+                    chunk_a=chunk["chunk_id"],
+                    chunk_b=dup_of,
+                    similarity=1.0,
+                    reason="content_hash",
+                )
+                # 同一项目内同内容只能有一个活跃实体：重复内容不再写入，
+                # 由 duplicates 表记录关系，等待人工决定保留哪一份溯源。
+                if not existing:
+                    skipped_duplicates.append({"chunk_id": chunk["chunk_id"], "duplicate_of": dup_of})
+                    continue
             seen_content.setdefault(fp, chunk["chunk_id"])
             prepared.append(chunk)
 
@@ -213,34 +392,37 @@ class KnowledgeStore:
                 updated += 1
             else:
                 added += 1
-            # 先写元数据（含词元索引），再写向量，保证检索时元数据一定已落库
-            self.metadata.upsert_chunk(chunk)
-        kept_ids: List[str] = []
-        kept_rows: List[int] = []
-        for row, chunk in enumerate(prepared):
-            cid = chunk["chunk_id"]
-            if cid in self._pos:
-                self._matrix[self._pos[cid]] = matrix[row]
-            else:
-                kept_ids.append(cid)
-                kept_rows.append(row)
-        if kept_ids:
-            new_block = matrix[kept_rows]
-            self._matrix = (
-                np.vstack([self._matrix, new_block]).astype(np.float32)
-                if self._matrix.size
-                else new_block.astype(np.float32)
-            )
-            start = len(self._ids)
-            self._ids.extend(kept_ids)
-            for offset, cid in enumerate(kept_ids):
-                self._pos[cid] = start + offset
-        self._dirty = True
-        self._save_index()
+        with self._index_lock():
+            self._sync_from_disk()
+            # 元数据（含倒排）在一个事务里落库，再写向量，保证检索时元数据已就绪
+            self.metadata.upsert_chunks_bulk(prepared)
+            kept_ids: List[str] = []
+            kept_rows: List[int] = []
+            for row, chunk in enumerate(prepared):
+                cid = chunk["chunk_id"]
+                if cid in self._pos:
+                    self._matrix[self._pos[cid]] = matrix[row]
+                else:
+                    kept_ids.append(cid)
+                    kept_rows.append(row)
+            if kept_ids:
+                new_block = matrix[kept_rows]
+                self._matrix = (
+                    np.vstack([self._matrix, new_block]).astype(np.float32)
+                    if self._matrix.size
+                    else new_block.astype(np.float32)
+                )
+                start = len(self._ids)
+                self._ids.extend(kept_ids)
+                for offset, cid in enumerate(kept_ids):
+                    self._pos[cid] = start + offset
+            self._dirty = True
+            self._save_index()
         return {
             "added": added,
             "updated": updated,
             "duplicates": duplicates,
+            "skipped": skipped_duplicates,
             "chunks": [c["chunk_id"] for c in prepared],
         }
 
@@ -256,7 +438,7 @@ class KnowledgeStore:
 
         if replace_existing:
             self._remove_document_vectors(document_id)
-            self.metadata.query("DELETE FROM chunks WHERE document_id=?", (document_id,))
+            self.metadata.execute_write("DELETE FROM chunks WHERE document_id=?", (document_id,))
         payload = []
         for raw in chunks:
             chunk = dict(raw)
@@ -451,7 +633,7 @@ class KnowledgeStore:
     ) -> List[Tuple[str, float]]:
         if not self._ids or not allowed:
             return []
-        qv = self.embedder.embed_one(query or "").astype(np.float32)
+        qv = self._embed_texts([query or ""])[0].astype(np.float32)
         if qv.shape[0] != self._matrix.shape[1]:
             raise KnowledgeStoreError(
                 f"查询向量维度 {qv.shape[0]} 与索引维度 {self._matrix.shape[1]} 不一致"
@@ -586,11 +768,39 @@ class KnowledgeStore:
         ids = self._allowed_ids(filters)
         if len(ids) < 2:
             return []
+        found: List[Dict[str, Any]] = []
+        # 先按内容指纹精确配对：只靠向量相似度会漏掉"同内容不同标题"
+        # （实测 sim=0.909 < 0.94），也无法覆盖哈希向量更新后的场景（审计 K-07）。
+        exact_pairs = set()
+        for row in self.metadata.query(
+            "SELECT project_id, content_hash FROM chunks WHERE chunk_id IN (%s) "
+            "AND content_hash<>'' GROUP BY project_id, content_hash HAVING COUNT(*)>1"
+            % ",".join("?" * len(ids)),
+            ids,
+        ):
+            group = self.metadata.query_dicts(
+                "SELECT chunk_id FROM chunks WHERE project_id=? AND content_hash=? AND invalidated_at=''",
+                (row["project_id"], row["content_hash"]),
+            )
+            group_ids = [g["chunk_id"] for g in group]
+            for i in range(len(group_ids)):
+                for j in range(i + 1, len(group_ids)):
+                    pair = tuple(sorted((group_ids[i], group_ids[j])))
+                    if pair in exact_pairs:
+                        continue
+                    exact_pairs.add(pair)
+                    found.append(
+                        {
+                            "chunk_a": pair[0],
+                            "chunk_b": pair[1],
+                            "similarity": 1.0,
+                            "reason": "content_hash",
+                        }
+                    )
         rows = [self._pos[cid] for cid in ids if cid in self._pos]
         if len(rows) < 2:
             return []
         sub = self._matrix[rows]
-        found: List[Dict[str, Any]] = []
         for start in range(0, len(rows), 256):
             block = sub[start : start + 256]
             sims = block @ sub.T
@@ -601,10 +811,13 @@ class KnowledgeStore:
                         return found
                     sim = float(sims[local_i, j])
                     if sim >= threshold:
+                        pair = tuple(sorted((self._ids[rows[global_i]], self._ids[rows[j]])))
+                        if pair in exact_pairs:
+                            continue
                         found.append(
                             {
-                                "chunk_a": self._ids[rows[global_i]],
-                                "chunk_b": self._ids[rows[j]],
+                                "chunk_a": pair[0],
+                                "chunk_b": pair[1],
                                 "similarity": round(sim, 4),
                                 "reason": "vector_similarity",
                             }
@@ -738,20 +951,69 @@ class KnowledgeStore:
             "db": db_target.name,
             "index": index_target.name,
             "chunks": self.metadata.count_chunks(),
+            "sources": int(self.metadata.scalar("SELECT COUNT(*) FROM sources", (), 0) or 0),
+            "documents": int(self.metadata.scalar("SELECT COUNT(*) FROM documents", (), 0) or 0),
+            "chunks_sha256": _file_sha256(db_target),
             "note": note,
             "embedder": self.embedder.embedder_id,
+            "schema_version": _schema_version(),
         }
         (dest / f"backup-{stamp}.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         return {"backup_dir": str(dest), **manifest}
 
-    def restore(self, db_file: str | Path, index_dir: str | Path | None = None) -> Dict[str, Any]:
-        """从备份恢复；恢复前会把当前库另存为 .pre-restore 副本。"""
+    def verify_backup(self, manifest_path: str | Path) -> Dict[str, Any]:
+        """校验备份清单：schema 版本、向量器、文件校验和。不通过就明确说原因。"""
+
+        path = Path(manifest_path)
+        if not path.exists():
+            return {"ok": False, "issues": [f"备份清单不存在: {path}"]}
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "issues": [f"备份清单损坏: {exc}"]}
+        issues: List[str] = []
+        warnings: List[str] = []
+        declared = int(manifest.get("schema_version") or 0)
+        if declared > _schema_version():
+            issues.append(
+                f"备份 schema 版本 {declared} 高于当前代码 {_schema_version()}，请先升级插件"
+            )
+        db_name = manifest.get("db") or ""
+        db_path = path.parent / db_name
+        if not db_name or not db_path.exists():
+            issues.append(f"备份数据库缺失: {db_name or '<未声明>'}")
+        elif manifest.get("chunks_sha256") and _file_sha256(db_path) != manifest["chunks_sha256"]:
+            issues.append("备份数据库校验和不匹配（文件可能被截断或篡改）")
+        if manifest.get("embedder") and manifest["embedder"] != self.embedder.embedder_id:
+            warnings.append(
+                f"备份向量器 {manifest.get('embedder')} 与当前 {self.embedder.embedder_id} 不同，"
+                "恢复后需要 rebuild_vector_index()"
+            )
+        return {"ok": not issues, "issues": issues, "warnings": warnings, "manifest": manifest}
+
+    def restore(
+        self,
+        db_file: str | Path,
+        index_dir: str | Path | None = None,
+        *,
+        manifest_path: str | Path | None = None,
+    ) -> Dict[str, Any]:
+        """从备份恢复；恢复前会把当前库另存为 .pre-restore 副本。
+
+        加固点：先校验清单（可选但强烈建议），恢复过程用 try/finally 保证
+        失败后连接仍能重新打开，不会把 store 留在"关着"的状态。
+        """
 
         db_file = Path(db_file)
         if not db_file.exists():
             raise KnowledgeStoreError(f"备份数据库不存在: {db_file}")
+        verification: Dict[str, Any] = {"ok": True, "issues": [], "warnings": []}
+        if manifest_path is not None:
+            verification = self.verify_backup(manifest_path)
+            if not verification["ok"]:
+                raise KnowledgeStoreError("备份校验未通过：" + "；".join(verification["issues"]))
         safety = self.metadata.db_path.with_suffix(".pre-restore.sqlite3")
         with self.metadata.transaction() as conn:
             target = __import__("sqlite3").connect(str(safety))
@@ -760,13 +1022,16 @@ class KnowledgeStore:
             finally:
                 target.close()
         self.metadata.close()
-        shutil.copy2(db_file, self.metadata.db_path)
-        for suffix in ("-wal", "-shm"):
-            extra = Path(str(self.metadata.db_path) + suffix)
-            if extra.exists():
-                extra.unlink()
-        self.metadata.connect()
-        self.metadata.migrate()
+        try:
+            shutil.copy2(db_file, self.metadata.db_path)
+            for suffix in ("-wal", "-shm"):
+                extra = Path(str(self.metadata.db_path) + suffix)
+                if extra.exists():
+                    extra.unlink()
+        finally:
+            # 无论复制成功与否都要把连接恢复起来，否则 store 之后所有操作都会失败
+            self.metadata.connect()
+            self.metadata.migrate()
         if index_dir:
             idx = Path(index_dir)
             for name in (MANIFEST, IDS, VECTORS):
@@ -777,7 +1042,12 @@ class KnowledgeStore:
         self._last_error = ""
         self._load_index()
         report = self.check_integrity()
-        return {"restored_from": str(db_file), "safety_copy": str(safety), "integrity": report}
+        return {
+            "restored_from": str(db_file),
+            "safety_copy": str(safety),
+            "integrity": report,
+            "verification": verification,
+        }
 
     def export(self, path: str | Path, fmt: str = "jsonl", filters: Optional[ChunkFilter] = None) -> Dict[str, Any]:
         target = Path(path)
@@ -826,12 +1096,62 @@ class KnowledgeStore:
 # --------------------------------------------------------------------------- #
 # 辅助
 # --------------------------------------------------------------------------- #
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _schema_version() -> int:
+    from .metadata_store import SCHEMA_VERSION
+
+    return int(SCHEMA_VERSION)
+
+
 def _index_text(chunk: Mapping[str, Any]) -> str:
     title = str(chunk.get("title") or "")
     summary = str(chunk.get("summary") or "")
     content = str(chunk.get("content") or "")
     # 标题权重更高：重复 2 次
     return f"{title}\n{title}\n{summary}\n{content}"
+
+
+def _content_changed(existing: Mapping[str, Any], raw: Mapping[str, Any]) -> bool:
+    """调用方是否给出了实质不同的内容（标题/标签变化不算）。"""
+
+    if "content" not in raw:
+        return False
+    new_content = raw.get("content")
+    if new_content is None:
+        return False
+    return normalize_text(str(new_content)) != normalize_text(str(existing.get("content") or ""))
+
+
+def _merge_existing(existing: Mapping[str, Any], raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """把"更新"请求合并到已有片段上。
+
+    只接受调用方显式给出的字段；受保护的状态字段直接丢弃（必须走状态机）。
+    """
+
+    allowed = set(existing.keys())
+    merged: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in allowed or key in {"chunk_id", "project_id", "created_at"}:
+            continue
+        if key in STATE_FIELDS:
+            continue
+        if value is None:
+            continue
+        merged[key] = value
+    # 身份列与创建时间必须带回去，否则 INSERT 分支会撞 NOT NULL，
+    # 或者把 created_at 改成"现在"。
+    merged["chunk_id"] = existing["chunk_id"]
+    merged["project_id"] = existing["project_id"]
+    merged["created_at"] = existing.get("created_at") or utcnow_iso()
+    merged["updated_at"] = utcnow_iso()
+    return merged
 
 
 def _coerce_chunk(raw: Mapping[str, Any]) -> Dict[str, Any]:

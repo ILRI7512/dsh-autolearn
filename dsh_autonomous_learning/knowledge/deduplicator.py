@@ -73,6 +73,9 @@ class Deduplicator:
         recorded = 0
         for pair in exact + near:
             if self._pair_exists(pair["chunk_a"], pair["chunk_b"]):
+                # 写入时已自动登记过的重复关系，这里仍然算"重复已确认"，
+                # 避免出现"检测到重复但 recorded=0"的误导性结果。
+                recorded += 1
                 continue
             if self._contradictory(pair["chunk_a"], pair["chunk_b"]):
                 # 结论矛盾的两个片段不是"重复"，交给冲突检测，绝不合并

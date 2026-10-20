@@ -107,8 +107,20 @@ def test_confirmations_persist_across_processes(config):
         rt.close()
 
 
-def test_host_delegation_skips_local_token(config):
-    """开启 delegate_approval_to_host 后，确认交给 DSH 宿主审批 UI。"""
+def test_host_delegation_skips_local_token(config, tmp_path, monkeypatch):
+    """闸门真的在运行时，确认交给 DSH 宿主审批 UI（不再产生本地令牌）。"""
+
+    import json as _json
+
+    profile = tmp_path / "profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "package.json").write_text(
+        _json.dumps({"dsh": {"profile": {"bundles": ["@local/dsh-autolearn-approval"]}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DSH_PROFILE_DIR", str(profile))
+    monkeypatch.setenv("DSH_AL_HOST_APPROVAL", "1")
+    monkeypatch.delenv("DSH_AL_HOST_APPROVAL_FILE", raising=False)
 
     config.security.delegate_approval_to_host = True
     config.learning.default_mode = "assisted"

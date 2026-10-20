@@ -46,7 +46,19 @@ def normalize_text(text: str) -> str:
 
 
 def content_fingerprint(text: str) -> str:
+    """内容指纹：只由正文决定，不含来源/文档 ID。
+
+    混入 document_id 会让"同一段文字出现在两个文件里"得到不同指纹，
+    跨文档去重永远不会触发（审计 F-06）。
+    """
+
     return stable_hash(normalize_text(text))
+
+
+def make_chunk_id(project_id: str, content_hash: str) -> str:
+    """知识片段 ID：项目 + 内容指纹 → 同一内容在同一项目内是同一实体（幂等）。"""
+
+    return "chunk_" + stable_hash(f"{project_id}|{content_hash}", 24)
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -116,11 +128,14 @@ class KnowledgeType(StrEnum):
 
 
 class Partition(StrEnum):
+    """基础设施分区（兼容层）。
+
+    具体知识领域的**分区不再写死在这里**：它们由 ``domains`` 注册表声明，
+    通过 ``knowledge.partitions.partition_for_domain()`` 取得。保留这几个常量
+    只是为了让"待审区 / 项目区 / 实验区 / 通用区"这些非领域分区有稳定名字。
+    """
+
     GENERAL = "general_knowledge"
-    UIUX = "uiux_knowledge"
-    FINANCE = "finance_knowledge"
-    QUANT = "quant_knowledge"
-    PROGRAMMING = "programming_knowledge"
     PROJECT = "project_knowledge"
     EXPERIMENT = "experiment_knowledge"
     PENDING = "pending_knowledge"
@@ -130,7 +145,8 @@ class TaskKind(StrEnum):
     PLAN = "plan"
     GAP_ANALYSIS = "gap_analysis"
     DISCOVER = "discover"
-    READ = "read"
+    # 注意：历史上这里还有个 READ，但编排器从未实现对应分支，
+    # 一旦计划器产生该类型就会抛"未知任务类型"。已移除（审计 T-01）。
     EXTRACT = "extract"
     VERIFY = "verify"
     PRACTICE = "practice"
@@ -360,6 +376,9 @@ class Document:
     parser: str = ""
     parse_status: str = "parsed"
     error: str = ""
+    # 真实阶段进度：registered / fetched / parsed / extracted / classified /
+    # indexed / retrieval_verified / task_verified（每步由实际执行结果置位）
+    stages: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utcnow_iso)
 
     def to_row(self) -> Dict[str, Any]:
@@ -407,6 +426,18 @@ class Chunk:
     verification_evidence: List[Dict[str, Any]] = field(default_factory=list)
     freshness_status: str = FreshnessStatus.UNKNOWN.value
     conflict_status: str = "none"  # none | potential | confirmed
+    #: 结构化知识字段（审计 K 组：这 8 项以前在 schema 层就缺失）
+    tags: List[str] = field(default_factory=list)
+    source_version: str = ""
+    source_excerpt: str = ""
+    core_principle: str = ""
+    reasoning: str = ""
+    application: str = ""
+    implementation: str = ""
+    anti_patterns: str = ""
+    #: 质量评估（可解释分量见 knowledge/quality.py）
+    quality_score: float = 0.0
+    quality_components: Dict[str, Any] = field(default_factory=dict)
     limitations: str = ""
     license_status: str = LicenseStatus.UNKNOWN.value
     visibility: str = "project"  # project | global

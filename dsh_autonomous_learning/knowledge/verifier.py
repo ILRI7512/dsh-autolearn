@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
+from .quality import assess_quality
 from ..core.models import (
     Chunk,
     KnowledgeStatus,
@@ -187,8 +188,26 @@ class KnowledgeVerifier:
             reasons.extend(why)
             independence = 1
         elif method == VerificationMethod.MANUAL_REVIEW.value:
-            result = VerificationResult.PASS.value if evidence_list else VerificationResult.FAIL.value
-            reasons.append("人工复核证据已提供" if evidence_list else "人工复核未提供任何证据")
+            # 关键修复：evidence_list 里永远有"条目自身来源"（_normalize_evidence 注入），
+            # 不能拿它当人工复核证据。人工复核只认调用方显式给出、且标明是人做的证据，
+            # 并要求 verifier="user"（工具通道传不进来，见 verification_tools）。
+            manual = [
+                dict(item)
+                for item in (evidence or [])
+                if str(item.get("kind") or "") in {"user_review", "human_review", "manual_review"}
+                and str(item.get("actor") or item.get("verifier") or "user").lower()
+                in {"user", "human"}
+            ]
+            if verifier != "user" or not manual:
+                result = VerificationResult.PARTIAL.value
+                reasons.append(
+                    "人工复核不成立：需要 verifier=user 且提供人工证据"
+                    "（条目自身来源与模型自述都不算人工复核）"
+                )
+            else:
+                evidence_list.extend(manual)
+                result = VerificationResult.PASS.value
+                reasons.append(f"人工复核证据 {len(manual)} 条")
             independence = self._independence(chunk_row, evidence_list)
         else:  # pragma: no cover - 枚举已覆盖
             warnings.append(f"未知核验方法 {method}，按无证据处理")
@@ -225,7 +244,7 @@ class KnowledgeVerifier:
         chunk.verification_method = method
         chunk.verification_evidence = evidence_list
         min_count, min_indep, min_quality = effective_requirements(
-            chunk.knowledge_type, chunk.source_type, records
+            chunk.knowledge_type, chunk.source_type, records, domain=chunk.domain
         )
         requirements_met = (
             chunk.evidence_count >= min_count
@@ -271,6 +290,15 @@ class KnowledgeVerifier:
         chunk.level = compute_level(chunk, records)
         chunk.updated_at = utcnow_iso()
 
+        # 质量评估：按公开权重的可解释分量，随核验结果一起刷新
+        quality = assess_quality(
+            {
+                **chunk.to_row(),
+                "verification_status": chunk.verification_status,
+            },
+            records,
+        )
+
         self.metadata.update_chunk(
             chunk_id,
             {
@@ -283,6 +311,8 @@ class KnowledgeVerifier:
                 "evidence_independence": chunk.evidence_independence,
                 "confidence": chunk.confidence,
                 "confidence_basis": chunk.confidence_basis,
+                "quality_score": quality.score,
+                "quality_components": quality.components,
                 "updated_at": chunk.updated_at,
             },
         )
@@ -413,7 +443,7 @@ class KnowledgeVerifier:
         independence: int,
     ) -> tuple[str, List[str]]:
         reasons: List[str] = []
-        min_count, min_indep, min_quality = evidence_requirements(chunk.knowledge_type)
+        min_count, min_indep, min_quality = evidence_requirements(chunk.knowledge_type, chunk.domain)
         if not evidence:
             return VerificationResult.FAIL.value, ["没有任何来源证据"]
         reasons.append(f"收集到 {len(evidence)} 条来源证据，独立来源 {independence} 个")
@@ -550,9 +580,11 @@ class KnowledgeVerifier:
                 findings.append("代码含 TODO/FIXME，可能未完成")
         if findings:
             return VerificationResult.PARTIAL.value, findings
+        # 静态检查只能说明"没发现明显问题"，不能证明代码正确：
+        # 它永远只能给 partial，不得单独支撑 verified。
         return (
-            VerificationResult.PASS.value,
-            ["静态检查未发现明显问题（这不等于代码正确，仍建议执行测试）"],
+            VerificationResult.PARTIAL.value,
+            ["静态检查未发现明显问题（这不等于代码正确，需代码执行或实验验证才能升级）"],
         )
 
     def _finish_non_verifiable(self, chunk: Chunk, reasons: List[str]) -> Dict[str, Any]:

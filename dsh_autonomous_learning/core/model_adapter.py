@@ -83,6 +83,14 @@ class BaseModel:
     def __init__(self, cfg: ModelConfig) -> None:
         self.cfg = cfg
         self.limiter = RateLimiter(cfg.rate_limit_per_min)
+        # 每次成功调用后触发（BudgetTracker 挂在这里做调用数/成本记账）。
+        # 历史问题：BudgetTracker.consume_llm 从未被任何地方调用，
+        # 导致单轮调用上限、每日预算、单轮费用上限全部形同虚设。
+        self.hooks: List[Callable[[ModelResponse], None]] = []
+
+    def charge(self, response: "ModelResponse") -> None:
+        for hook in list(self.hooks):
+            hook(response)
 
     def complete(
         self,
@@ -189,10 +197,11 @@ class MockModel(BaseModel):
             stage=stage,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_estimate=0.0,
+            cost_estimate=self._estimate_cost(prompt_tokens, completion_tokens),
             parsed=payload,
         )
         self.calls.append({"stage": stage, "text": text, "schema": bool(json_schema)})
+        self.charge(response)
         return response
 
 
@@ -285,7 +294,7 @@ class OpenAICompatModel(BaseModel):
                     prompt_tokens = int(usage.get("prompt_tokens", 0))
                     completion_tokens = int(usage.get("completion_tokens", 0))
                     parsed = _extract_json(text) if json_schema else None
-                    return ModelResponse(
+                    response = ModelResponse(
                         text=text,
                         model=model,
                         stage=stage,
@@ -295,6 +304,8 @@ class OpenAICompatModel(BaseModel):
                         parsed=parsed,
                         raw=data,
                     )
+                    self.charge(response)
+                    return response
                 except ModelError:
                     raise
                 except Exception as exc:  # noqa: BLE001

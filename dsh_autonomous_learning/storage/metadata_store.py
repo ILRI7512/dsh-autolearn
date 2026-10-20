@@ -22,9 +22,55 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from ..core.models import new_id
 from .tokenizer import BM25Params, expand_query
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 7
+
+#: 逐版本迁移步骤（在新库上由 SCHEMA_SQL 直接建好，旧库按版本号补齐）。
+#: 每条语句都必须是幂等的：迁移可能在部分失败后重跑。
+MIGRATIONS: Dict[int, Tuple[str, ...]] = {
+    2: (
+        "CREATE INDEX IF NOT EXISTS idx_chunks_content_proj ON chunks(project_id, content_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_sources_location ON sources(project_id, location)",
+    ),
+    3: (
+        # 活跃片段在同一项目内按内容指纹唯一：重复内容只能有一个"活的"实体。
+        # 已失效/已被替代的行不参与约束，历史全部保留。
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_chunks_live_content "
+        "ON chunks(project_id, content_hash) "
+        "WHERE invalidated_at = '' AND content_hash <> ''",
+    ),
+    4: (
+        # 真实阶段进度：registered/fetched/parsed/extracted/classified/indexed
+        "ALTER TABLE documents ADD COLUMN stages TEXT NOT NULL DEFAULT '{}'",
+    ),
+    7: (
+        "ALTER TABLE chunks ADD COLUMN quality_score REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE chunks ADD COLUMN quality_components TEXT NOT NULL DEFAULT '{}'",
+    ),
+    6: (
+        # embedding 缓存：同内容同向量器只算一次（审计 S-15）
+        "CREATE TABLE IF NOT EXISTS embedding_cache ("
+        " cache_key TEXT PRIMARY KEY,"
+        " embedder_id TEXT NOT NULL,"
+        " dim INTEGER NOT NULL,"
+        " vector BLOB NOT NULL,"
+        " created_at TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_embedding_cache_embedder ON embedding_cache(embedder_id)",
+    ),
+    5: (
+        # 知识结构补齐（审计 K 组：目标 22 字段里 10 项在 schema 层就缺失）
+        "ALTER TABLE chunks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE chunks ADD COLUMN source_version TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chunks ADD COLUMN source_excerpt TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chunks ADD COLUMN core_principle TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chunks ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chunks ADD COLUMN application TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chunks ADD COLUMN implementation TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chunks ADD COLUMN anti_patterns TEXT NOT NULL DEFAULT ''",
+    ),
+}
 
 
 class StorageError(RuntimeError):
@@ -134,6 +180,7 @@ CREATE TABLE IF NOT EXISTS documents (
     parser       TEXT NOT NULL DEFAULT '',
     parse_status TEXT NOT NULL DEFAULT 'parsed',
     error        TEXT NOT NULL DEFAULT '',
+    stages       TEXT NOT NULL DEFAULT '{}',
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);
@@ -174,6 +221,16 @@ CREATE TABLE IF NOT EXISTS chunks (
     freshness_status      TEXT NOT NULL DEFAULT 'unknown',
     conflict_status       TEXT NOT NULL DEFAULT 'none',
     limitations           TEXT NOT NULL DEFAULT '',
+    tags                  TEXT NOT NULL DEFAULT '[]',
+    source_version        TEXT NOT NULL DEFAULT '',
+    source_excerpt        TEXT NOT NULL DEFAULT '',
+    core_principle        TEXT NOT NULL DEFAULT '',
+    reasoning             TEXT NOT NULL DEFAULT '',
+    application           TEXT NOT NULL DEFAULT '',
+    implementation        TEXT NOT NULL DEFAULT '',
+    anti_patterns         TEXT NOT NULL DEFAULT '',
+    quality_score         REAL NOT NULL DEFAULT 0,
+    quality_components    TEXT NOT NULL DEFAULT '{}',
     license_status        TEXT NOT NULL DEFAULT 'unknown',
     visibility            TEXT NOT NULL DEFAULT 'project',
     metadata              TEXT NOT NULL DEFAULT '{}',
@@ -185,9 +242,20 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_chunks_partition ON chunks(partition);
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_content_proj ON chunks(project_id, content_hash);
+CREATE INDEX IF NOT EXISTS idx_sources_location ON sources(project_id, location);
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_domain ON chunks(domain, topic);
 CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status, verification_status);
+
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    cache_key   TEXT PRIMARY KEY,
+    embedder_id TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_cache_embedder ON embedding_cache(embedder_id);
 
 CREATE TABLE IF NOT EXISTS chunk_versions (
     id            TEXT PRIMARY KEY,
@@ -389,8 +457,8 @@ JSON_COLUMNS: Dict[str, Tuple[str, ...]] = {
     "tasks": ("inputs", "steps", "depends_on", "acceptance", "result"),
     "runs": ("summary",),
     "sources": ("metadata",),
-    "documents": (),
-    "chunks": ("verification_evidence", "metadata"),
+    "documents": ("stages",),
+    "chunks": ("verification_evidence", "metadata", "tags", "quality_components"),
     "verification_records": ("evidence",),
     "conflicts": ("evidence",),
     "duplicates": (),
@@ -402,6 +470,7 @@ JSON_COLUMNS: Dict[str, Tuple[str, ...]] = {
     "metrics": ("metadata",),
     "audit_log": ("detail",),
     "chunk_versions": (),
+    "embedding_cache": (),
     "llm_calls": (),
     "schedules": (),
 }
@@ -438,12 +507,14 @@ COLUMNS: Dict[str, Tuple[str, ...]] = {
     "documents": (
         "document_id", "project_id", "source_id", "title", "doc_type", "language",
         "content_path", "content_hash", "char_count", "parser", "parse_status", "error",
-        "created_at",
+        "stages", "created_at",
     ),
     "chunks": (
         "chunk_id", "project_id", "document_id", "partition", "domain", "topic", "subtopic",
         "title", "content", "summary", "knowledge_type", "status", "level", "source_id",
         "source_url", "source_title", "source_type", "author_or_publisher", "published_at",
+        "tags", "source_version", "source_excerpt", "core_principle", "reasoning",
+        "application", "implementation", "anti_patterns", "quality_score", "quality_components",
         "accessed_at", "language", "content_hash", "version", "source_quality",
         "evidence_count", "evidence_independence", "confidence", "confidence_basis",
         "verification_status", "verification_method", "verification_evidence",
@@ -455,6 +526,7 @@ COLUMNS: Dict[str, Tuple[str, ...]] = {
         "id", "chunk_id", "version", "content_hash", "content", "status",
         "change_reason", "changed_at",
     ),
+    "embedding_cache": ("cache_key", "embedder_id", "dim", "vector", "created_at"),
     "verification_records": (
         "record_id", "chunk_id", "method", "result", "evidence", "notes", "verifier",
         "created_at",
@@ -506,6 +578,7 @@ PRIMARY_KEYS = {
     "documents": "document_id",
     "chunks": "chunk_id",
     "chunk_versions": "id",
+    "embedding_cache": "cache_key",
     "verification_records": "record_id",
     "conflicts": "conflict_id",
     "duplicates": "dup_id",
@@ -659,21 +732,43 @@ class MetadataStore:
                 raise
 
     def migrate(self) -> None:
+        """建表 + 逐版本迁移。
+
+        旧实现只有版本号没有迁移步骤：``CREATE TABLE IF NOT EXISTS`` 会跳过
+        已存在的表，因此后续加列/加索引在旧库上永远不生效，运行期直接
+        ``no such column``。这里按 ``MIGRATIONS`` 逐版本执行。
+        """
+
         with self.transaction() as conn:
             conn.executescript(SCHEMA_SQL)
             cur = conn.execute("SELECT value FROM meta WHERE key='schema_version'")
             row = cur.fetchone()
             if row is None:
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
-                    (str(SCHEMA_VERSION),),
-                )
+                # 新库也走一遍迁移：建表之后由迁移负责补约束，
+                # 保证"新库"与"老库升级后"结构完全一致。
+                conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '0')")
+                found = 0
             else:
                 found = int(row["value"])
-                if found > SCHEMA_VERSION:
-                    raise StorageError(
-                        f"数据库 schema 版本 {found} 高于代码支持的 {SCHEMA_VERSION}，请升级插件"
-                    )
+            if found > SCHEMA_VERSION:
+                raise StorageError(
+                    f"数据库 schema 版本 {found} 高于代码支持的 {SCHEMA_VERSION}，请升级插件"
+                )
+            for version in range(found + 1, SCHEMA_VERSION + 1):
+                hook = MIGRATION_HOOKS.get(version)
+                if hook is not None:
+                    hook(self, conn)
+                for statement in MIGRATIONS.get(version, ()):
+                    try:
+                        conn.execute(statement)
+                    except sqlite3.OperationalError as exc:  # 幂等重跑
+                        message = str(exc).lower()
+                        if "already exists" not in message and "duplicate column" not in message:
+                            raise
+            if found < SCHEMA_VERSION:
+                conn.execute(
+                    "UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
+                )
 
     # ------------------------------------------------------------------ #
     # 通用读写
@@ -726,16 +821,14 @@ class MetadataStore:
         if not pk:
             raise StorageError(f"表 {table} 没有主键，无法 upsert")
         row = _coerce_row(table, row)
-        encoded = self._encode(table, row)
-        cols = ", ".join(encoded)
-        marks = ", ".join("?" * len(encoded))
-        updates = ", ".join(f"{c}=excluded.{c}" for c in encoded if c != pk)
-        with self.transaction() as conn:
-            conn.execute(
-                f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
-                f"ON CONFLICT({pk}) DO UPDATE SET {updates}",
-                list(encoded.values()),
-            )
+        if not row.get(pk):
+            raise StorageError(f"表 {table} 的 upsert 必须提供主键 {pk}")
+        # 已存在就走 UPDATE：部分列 upsert 不该因为其它 NOT NULL 列缺失而失败
+        if self.get(table, row[pk], pk) is not None:
+            self.update(table, row[pk], {k: v for k, v in row.items() if k != pk})
+            return dict(row)
+        row = _stamp_row(table, row)
+        self.insert(table, row)
         return dict(row)
 
     def update(self, table: str, id_value: Any, fields: Mapping[str, Any]) -> int:
@@ -767,9 +860,32 @@ class MetadataStore:
             cur = conn.execute(f"DELETE FROM {table} WHERE {pk}=?", (id_value,))
             return cur.rowcount
 
+    READONLY_PREFIXES = ("SELECT", "WITH", "PRAGMA", "EXPLAIN")
+
     def query(self, sql: str, params: Sequence[Any] = ()) -> List[sqlite3.Row]:
+        """只读查询。
+
+        历史问题：有调用方用 ``query("DELETE ...")`` 删数据，而 ``query`` 不会
+        commit，删除被静默回滚且连接留下悬挂写事务。这里显式拒绝非只读语句，
+        写操作必须走 ``execute_write`` / ``insert`` / ``update`` / ``upsert``。
+        """
+
+        head = (sql or "").lstrip().split(None, 1)
+        prefix = head[0].upper() if head else ""
+        if not prefix.startswith(self.READONLY_PREFIXES):
+            raise StorageError(
+                f"query() 只接受只读语句，收到 {prefix or '<空>'}；"
+                "写操作请使用 execute_write()/insert()/update()/upsert()"
+            )
         with self._lock:
             return list(self.conn.execute(sql, params).fetchall())
+
+    def execute_write(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """执行并提交一条写语句，返回受影响行数。"""
+
+        with self.transaction() as conn:
+            cur = conn.execute(sql, params)
+            return int(cur.rowcount)
 
     def query_dicts(self, sql: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
         return [dict(r) for r in self.query(sql, params)]
@@ -911,9 +1027,39 @@ class MetadataStore:
         return dict(chunk)
 
     def upsert_chunk(self, chunk: Mapping[str, Any]) -> Dict[str, Any]:
-        self.upsert("chunks", chunk)
-        self._reindex_chunk(chunk)
+        self.upsert_chunks_bulk([chunk])
         return dict(chunk)
+
+    def upsert_chunks_bulk(self, chunks: Sequence[Mapping[str, Any]]) -> int:
+        """批量写知识片段：正行与倒排索引在**同一个事务**里完成。
+
+        单条 ``upsert`` + ``_reindex_chunk`` 是两个事务，中途失败会出现
+        "chunks 有、tokens 缺"，关键词通道静默漏召回。
+        """
+
+        if not chunks:
+            return 0
+        written = 0
+        with self.transaction() as conn:
+            for chunk in chunks:
+                if "chunk_id" not in chunk:
+                    raise StorageError("知识片段缺少 chunk_id")
+                row = _stamp_row("chunks", _coerce_row("chunks", chunk))
+                encoded = self._encode("chunks", row)
+                cols = ", ".join(encoded)
+                marks = ", ".join("?" * len(encoded))
+                updates = ", ".join(f"{c}=excluded.{c}" for c in encoded if c != "chunk_id")
+                conn.execute(
+                    f"INSERT INTO chunks ({cols}) VALUES ({marks}) "
+                    f"ON CONFLICT(chunk_id) DO UPDATE SET {updates}",
+                    list(encoded.values()),
+                )
+                merged = self._decode(
+                    "chunks", conn.execute("SELECT * FROM chunks WHERE chunk_id=?", (row["chunk_id"],)).fetchone()
+                ) or dict(row)
+                self._reindex_chunk_conn(conn, merged)
+                written += 1
+        return written
 
     def update_chunk(self, chunk_id: str, fields: Mapping[str, Any]) -> None:
         fields = {**fields, "updated_at": fields.get("updated_at") or _now()}
@@ -999,6 +1145,10 @@ class MetadataStore:
     # 词元索引 / BM25
     # ------------------------------------------------------------------ #
     def _reindex_chunk(self, chunk: Mapping[str, Any]) -> None:
+        with self.transaction() as conn:
+            self._reindex_chunk_conn(conn, chunk)
+
+    def _reindex_chunk_conn(self, conn: sqlite3.Connection, chunk: Mapping[str, Any]) -> None:
         from .tokenizer import term_frequencies, tokenize
 
         text = "\n".join(
@@ -1006,16 +1156,15 @@ class MetadataStore:
         )
         freqs = term_frequencies(text)
         length = len(tokenize(text))
-        with self.transaction() as conn:
-            conn.execute("DELETE FROM tokens WHERE chunk_id=?", (chunk["chunk_id"],))
-            conn.executemany(
-                "INSERT OR REPLACE INTO tokens(chunk_id, token, tf) VALUES (?,?,?)",
-                [(chunk["chunk_id"], tok, tf) for tok, tf in freqs.items()],
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO chunk_lex(chunk_id, length) VALUES (?,?)",
-                (chunk["chunk_id"], length),
-            )
+        conn.execute("DELETE FROM tokens WHERE chunk_id=?", (chunk["chunk_id"],))
+        conn.executemany(
+            "INSERT OR REPLACE INTO tokens(chunk_id, token, tf) VALUES (?,?,?)",
+            [(chunk["chunk_id"], tok, tf) for tok, tf in freqs.items()],
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO chunk_lex(chunk_id, length) VALUES (?,?)",
+            (chunk["chunk_id"], length),
+        )
 
     def delete_chunk(self, chunk_id: str) -> int:
         with self.transaction() as conn:
@@ -1143,6 +1292,103 @@ class MetadataStore:
             args.append(project_id)
         sql += " ORDER BY similarity DESC"
         return self.query_dicts(sql, args)
+
+    # ------------------------------------------------------------------ #
+    # embedding 缓存（同内容同向量器只算一次）
+    # ------------------------------------------------------------------ #
+    def get_embedding_blobs(self, keys: Sequence[str], embedder_id: str) -> Dict[str, bytes]:
+        if not keys:
+            return {}
+        out: Dict[str, bytes] = {}
+        unique = list(dict.fromkeys(keys))
+        for start in range(0, len(unique), 400):
+            batch = unique[start : start + 400]
+            rows = self.query(
+                f"SELECT cache_key, vector FROM embedding_cache WHERE embedder_id=? "
+                f"AND cache_key IN ({','.join('?' * len(batch))})",
+                [embedder_id, *batch],
+            )
+            for row in rows:
+                out[row["cache_key"]] = bytes(row["vector"])
+        return out
+
+    def put_embedding_blobs(self, items: Sequence[Mapping[str, Any]]) -> int:
+        """批量写入缓存（一个事务）。"""
+
+        if not items:
+            return 0
+        written = 0
+        with self.transaction() as conn:
+            for item in items:
+                conn.execute(
+                    "INSERT OR REPLACE INTO embedding_cache"
+                    "(cache_key, embedder_id, dim, vector, created_at) VALUES (?,?,?,?,?)",
+                    (
+                        item["cache_key"],
+                        item["embedder_id"],
+                        int(item["dim"]),
+                        item["vector"],
+                        item.get("created_at") or _now(),
+                    ),
+                )
+                written += 1
+        return written
+
+    def prune_embedding_cache(self, keep: int) -> int:
+        """只保留最近 ``keep`` 条缓存（0 表示不淘汰），返回删除条数。"""
+
+        if keep <= 0:
+            return 0
+        total = int(self.scalar("SELECT COUNT(*) FROM embedding_cache", (), 0) or 0)
+        if total <= keep:
+            return 0
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "DELETE FROM embedding_cache WHERE cache_key IN ("
+                " SELECT cache_key FROM embedding_cache ORDER BY created_at ASC, cache_key ASC"
+                " LIMIT ?)",
+                (total - keep,),
+            )
+            return int(cur.rowcount)
+
+    def embedding_cache_stats(self, embedder_id: str = "") -> Dict[str, int]:
+        if embedder_id:
+            total = self.scalar("SELECT COUNT(*) FROM embedding_cache WHERE embedder_id=?", (embedder_id,), 0)
+        else:
+            total = self.scalar("SELECT COUNT(*) FROM embedding_cache", (), 0)
+        return {"entries": int(total or 0)}
+
+    def record_duplicate(
+        self,
+        *,
+        project_id: str,
+        chunk_a: str,
+        chunk_b: str,
+        similarity: float = 0.0,
+        reason: str = "",
+    ) -> bool:
+        """登记一条重复关系（同一对片段只登记一次，返回是否新增）。"""
+
+        if not project_id or not chunk_a or not chunk_b or chunk_a == chunk_b:
+            return False
+        pair = {chunk_a, chunk_b}
+        for row in self.list_duplicates(project_id):
+            if {row.get("chunk_a"), row.get("chunk_b")} == pair:
+                return False
+        self.insert(
+            "duplicates",
+            {
+                "dup_id": new_id("dup"),
+                "project_id": project_id,
+                "chunk_a": chunk_a,
+                "chunk_b": chunk_b,
+                "similarity": float(similarity),
+                "reason": reason,
+                "status": "open",
+                "created_at": _now(),
+            },
+        )
+        return True
 
     def add_edge(self, edge: Mapping[str, Any]) -> None:
         self.insert("edges", edge)
@@ -1370,6 +1616,38 @@ class MetadataStore:
         return {t: self.count(t) for t in tables}
 
 
+def _migrate_v3(store: "MetadataStore", conn: sqlite3.Connection) -> None:
+    """v3：把同一项目内的重复活跃片段标记为 superseded（保留数据），再建唯一索引。
+
+    不删除任何行：旧的重复实体转为 ``invalidated_at`` 非空 + ``superseded_by``
+    指向保留项，检索/统计按"活跃片段"口径即可，历史仍可追溯。
+    """
+
+    groups = conn.execute(
+        "SELECT project_id, content_hash, COUNT(*) AS n FROM chunks "
+        "WHERE invalidated_at = '' AND content_hash <> '' "
+        "GROUP BY project_id, content_hash HAVING n > 1"
+    ).fetchall()
+    now = _now()
+    for group in groups:
+        rows = conn.execute(
+            "SELECT chunk_id, status, version, created_at FROM chunks "
+            "WHERE project_id=? AND content_hash=? AND invalidated_at='' "
+            "ORDER BY (verification_status='verified') DESC, version DESC, created_at ASC",
+            (group["project_id"], group["content_hash"]),
+        ).fetchall()
+        keep = rows[0]["chunk_id"]
+        for row in rows[1:]:
+            conn.execute(
+                "UPDATE chunks SET invalidated_at=?, superseded_by=?, status='superseded', updated_at=? "
+                "WHERE chunk_id=?",
+                (now, keep, now, row["chunk_id"]),
+            )
+
+
+MIGRATION_HOOKS: Dict[int, Any] = {3: _migrate_v3}
+
+
 def _coerce_row(table: str, row: Any) -> Mapping[str, Any]:
     """允许传 dataclass 实体（带 to_row）或普通映射。"""
 
@@ -1379,6 +1657,19 @@ def _coerce_row(table: str, row: Any) -> Mapping[str, Any]:
     if callable(to_row):
         return to_row()
     raise StorageError(f"表 {table} 的行数据必须是 Mapping 或带 to_row() 的实体，收到 {type(row).__name__}")
+
+
+def _stamp_row(table: str, row: Mapping[str, Any]) -> Dict[str, Any]:
+    """为带时间戳的表补齐 created_at/updated_at（部分列 upsert 需要）。"""
+
+    out = dict(row)
+    columns = COLUMNS.get(table, ())
+    now = _now()
+    if "created_at" in columns and not out.get("created_at"):
+        out["created_at"] = now
+    if "updated_at" in columns and not out.get("updated_at"):
+        out["updated_at"] = now
+    return out
 
 
 def _now() -> str:

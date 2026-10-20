@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,7 +33,9 @@ from ..knowledge.partitions import (
     project_partitions,
 )
 from ..knowledge.partitions import ensure_partition_allowed
-from ..knowledge.verifier import KnowledgeVerifier
+from ..knowledge.verifier import KnowledgeVerifier, chunk_from_dict
+from .state_machine import compute_level, evaluate_transition
+from .telemetry import JsonlLogger, build_logger
 from ..knowledge.version_manager import VersionManager
 from ..practice.experiment_runner import ExperimentRunner
 from ..practice.task_generator import PracticeTaskGenerator
@@ -40,7 +43,7 @@ from ..practice.test_runner import CodeTestRunner
 from ..security.execution_policy import ExecutionPolicy
 from ..security.permissions import PermissionManager
 from ..sources.discovery import SourceDiscovery
-from ..sources.metadata import describe_source
+from ..sources.metadata import describe_source, normalize_location
 from ..sources.reader import SourceReader
 from ..storage.metadata_store import ChunkFilter, MetadataStore, StorageError
 from ..storage.vector_store import KnowledgeStore, KnowledgeStoreError
@@ -51,6 +54,7 @@ from .gap_analyzer import KnowledgeGapAnalyzer
 from .model_adapter import BaseModel, build_model
 from .models import (
     Document,
+    VerificationRecord,
     KnowledgeStatus,
     LearningLevel,
     Partition,
@@ -93,6 +97,7 @@ class Runtime:
     experiments: ExperimentRunner
     reporter: ReportGenerator
     policy: ExecutionPolicy
+    telemetry: JsonlLogger
 
     def close(self) -> None:
         self.metadata.close()
@@ -137,7 +142,9 @@ def build_runtime(config: Config, *, mode: Optional[str] = None) -> Runtime:
     metadata = MetadataStore(config.paths.db_path)
     metadata.migrate()
     embedder = build_embedder(config.embedding)
-    store = KnowledgeStore(metadata, config.paths.index_dir, embedder, config.retrieval)
+    store = KnowledgeStore(
+        metadata, config.paths.index_dir, embedder, config.retrieval, config.embedding
+    )
     model = build_model(config.model)
     permissions = PermissionManager(
         config.security,
@@ -175,6 +182,7 @@ def build_runtime(config: Config, *, mode: Optional[str] = None) -> Runtime:
         experiments=ExperimentRunner(policy, metadata, config.paths.experiments_dir),
         reporter=ReportGenerator(metadata, store, evaluator, config.paths.reports_dir),
         policy=policy,
+        telemetry=build_logger(config, config.paths.data_dir),
     )
     return runtime
 
@@ -308,9 +316,6 @@ class LearningOrchestrator:
         # 设置卡可能在两轮之间被改过：模式/预算/任务上限在这里刷新
         settings = self.rt.apply_settings()
 
-        if not self.metadata.list_tasks(project_id):
-            self.plan(project_id, use_model=use_model)
-
         self.recover(project_id)
         iteration = self.metadata.next_iteration(project_id)
         run = Run(
@@ -330,11 +335,19 @@ class LearningOrchestrator:
             daily_spent=self._today_spend(),
         )
         tracker.set_iteration(iteration)
+        # 真实调用记账：模型每次 complete() 都会回到 consume_llm
+        tracker.attach(self.rt.model)
+
+        # 首次规划也要计入预算：放到 tracker 挂载之后再调用模型
+        if not self.metadata.list_tasks(project_id):
+            self.plan(project_id, use_model=use_model)
 
         executed: List[Dict[str, Any]] = []
         new_knowledge = 0
         stop_reason = ""
-        limit = max_tasks or self.cfg.max_tasks_per_run
+        # 调用方给的 max_tasks 不能突破配置上限（审计 T-03）
+        limit = min(int(max_tasks or self.cfg.max_tasks_per_run), int(self.cfg.max_tasks_per_run))
+        limit = max(1, limit)
         error: str = ""
 
         try:
@@ -399,6 +412,7 @@ class LearningOrchestrator:
                         "max_tasks_per_run" if limit >= self.cfg.max_tasks_per_run else "task_limit_reached"
                     )
         finally:
+            tracker.detach()
             evaluation = self._safe_evaluate(project_id)
             summary = {
                 "run_id": run.run_id,
@@ -416,6 +430,18 @@ class LearningOrchestrator:
             if stop_reason == "error":
                 status = RunStatus.FAILED.value
             self.metadata.finish_run(run.run_id, status, summary, stop_reason)
+            self.rt.telemetry.log(
+                "run.finished",
+                run_id=run.run_id,
+                project_id=project_id,
+                iteration=iteration,
+                status=status,
+                stop_reason=stop_reason,
+                tasks=len(executed),
+                new_knowledge=new_knowledge,
+                llm_calls=tracker.state.llm_calls,
+                cost_estimate=round(tracker.state.cost_estimate, 6),
+            )
             self.metadata.record_metric("run", "new_knowledge", new_knowledge, project_id, run.run_id)
             if evaluation.get("goal_met"):
                 # 不自动把项目标记 completed：需要人工评审确认
@@ -451,7 +477,11 @@ class LearningOrchestrator:
             },
         )
         tracker.start_task()
+        started_at = time.monotonic()
         kind = task["kind"]
+        self.rt.telemetry.log(
+            "task.started", task_id=task_id, kind=kind, project_id=task["project_id"]
+        )
         project_id = task["project_id"]
         self.metadata.record_metric("task", f"start:{kind}", 1, project_id, run_id)
 
@@ -487,6 +517,15 @@ class LearningOrchestrator:
         else:
             raise ValueError(f"未知任务类型: {kind}")
 
+        self.rt.telemetry.log(
+            "task.completed",
+            task_id=task_id,
+            kind=kind,
+            project_id=project_id,
+            new_knowledge=int(result.get("new_knowledge", 0) or 0),
+            progress=bool(result.get("progress", False)),
+            elapsed_s=round(time.monotonic() - started_at, 3),
+        )
         self.metadata.update_task(
             task_id,
             {
@@ -515,6 +554,12 @@ class LearningOrchestrator:
                 "finished_at": utcnow_iso() if status == TaskStatus.FAILED.value else "",
             },
         )
+        self.rt.telemetry.log(
+            "task.failed", level="WARN", task_id=task["task_id"], kind=task["kind"],
+            project_id=task["project_id"], status=status, error=str(exc)[:300],
+        )
+        if status == TaskStatus.FAILED.value:
+            self._block_dependents(task["task_id"], task["project_id"], str(exc)[:300])
         self.rt.permissions.audit.log(
             action="task_failed",
             target=task["task_id"],
@@ -523,6 +568,57 @@ class LearningOrchestrator:
             project_id=task["project_id"],
             detail={"kind": task["kind"], "error": str(exc)[:300], "status": status},
         )
+
+    def _block_dependents(self, task_id: str, project_id: str, reason: str) -> int:
+        """依赖任务永久失败时，把下游标 blocked，避免项目静默停滞。"""
+
+        blocked = 0
+        for row in self.metadata.list_tasks(project_id, status=["pending", "retrying"]):
+            deps = list(row.get("depends_on") or [])
+            if task_id not in deps:
+                continue
+            self.metadata.update_task(
+                row["task_id"],
+                {
+                    "status": TaskStatus.BLOCKED.value,
+                    "error": f"依赖任务 {task_id} 永久失败，已阻塞：{reason}",
+                },
+            )
+            blocked += 1
+        return blocked
+
+    @staticmethod
+    def _task_timed_out(task: Mapping[str, Any], started: float) -> bool:
+        timeout_s = int(task.get("timeout_s") or 0)
+        return timeout_s > 0 and (time.monotonic() - started) > timeout_s
+
+    @staticmethod
+    def _parse_json_obj(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _parse_stages(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _document_topic(source: Mapping[str, Any]) -> str:
+        return str((source.get("metadata") or {}).get("topic") or "")
 
     # ------------------------------------------------------------------ #
     # 具体任务
@@ -544,7 +640,19 @@ class LearningOrchestrator:
         saved: List[Dict[str, Any]] = []
         failures: List[Dict[str, Any]] = []
         for candidate in found["candidates"][: self.cfg.max_sources_per_task]:
-            read = self.rt.reader.read(candidate["location"], project_id=project["project_id"])
+            normalized = normalize_location(candidate["location"])
+            prev_rows = self.metadata.query_dicts(
+                "SELECT * FROM sources WHERE project_id=? AND location=? ORDER BY created_at DESC LIMIT 1",
+                (project["project_id"], normalized),
+            )
+            prev_meta = (prev_rows[0].get("metadata") or {}) if prev_rows else None
+            read = self.rt.reader.read(
+                candidate["location"], project_id=project["project_id"], prev_meta=prev_meta
+            )
+            if getattr(read, "not_modified", False):
+                # 条件请求命中 304：内容没变，不重新解析、不入库、不重复 embedding
+                warnings.append(f"内容未修改，已跳过: {candidate['location']}")
+                continue
             if not read.ok:
                 failures.append({"location": candidate["location"], "error": read.error})
                 source = Source(
@@ -597,24 +705,75 @@ class LearningOrchestrator:
         if not getattr(read, "ok", False):
             raise StorageError(getattr(read, "error", "读取失败"))
         info = read.metadata or {}
-        source = Source(
-            source_id=new_id("src"),
-            project_id=project_id,
-            source_type=read.source_type,
-            location=read.location,
-            title=read.title,
-            publisher=info.get("publisher", ""),
-            published_at=info.get("published_at", ""),
-            accessed_at=utcnow_iso(),
-            license_status=info.get("license_status", "unknown"),
-            quality=float(info.get("quality", 0.5) or 0.5),
-            quality_basis=info.get("quality_basis", ""),
-            freshness_status=info.get("freshness_status", "unknown"),
-            content_hash=read.content_hash,
-            fetch_ok=True,
-            metadata={"bytes": read.bytes_read, "doc_type": read.doc_type, "topic": topic},
+        # 来源稳定标识：同一 location 只保留一行，重复抓取是"更新"而不是"新增"
+        location = normalize_location(read.location or "")
+        existing_source = self.metadata.query_dicts(
+            "SELECT * FROM sources WHERE project_id=? AND location=? ORDER BY created_at DESC LIMIT 1",
+            (project_id, location),
         )
-        self.metadata.insert("sources", source.to_row())
+        if existing_source:
+            source_row = existing_source[0]
+            prev_meta = self._parse_json_obj(source_row.get("metadata"))
+            changed = (source_row.get("content_hash") or "") != (read.content_hash or "")
+            self.metadata.update(
+                "sources",
+                source_row["source_id"],
+                {
+                    "title": read.title or source_row.get("title", ""),
+                    "content_hash": read.content_hash,
+                    "accessed_at": utcnow_iso(),
+                    "fetch_ok": True,
+                    "error": "",
+                    "metadata": {
+                        **prev_meta,
+                        **(info or {}),
+                        "bytes": read.bytes_read,
+                        "doc_type": read.doc_type,
+                        "topic": topic or prev_meta.get("topic", ""),
+                    },
+                },
+            )
+            superseded = 0
+            if changed:
+                superseded = self._supersede_documents(
+                    project_id, source_row["source_id"], reason="来源内容发生变化"
+                )
+            else:
+                # 内容完全没变：不新增文档、不重新解析、不重复 embedding
+                return {
+                    "source_id": source_row["source_id"],
+                    "document_id": "",
+                    "location": location,
+                    "chars": len(read.text),
+                    "source_type": read.source_type,
+                    "quality": float(source_row.get("quality", 0.5) or 0.5),
+                    "unchanged": True,
+                    "superseded_documents": 0,
+                }
+            source_id_value = source_row["source_id"]
+            quality_value = float(source_row.get("quality", 0.5) or 0.5)
+        else:
+            source = Source(
+                source_id=new_id("src"),
+                project_id=project_id,
+                source_type=read.source_type,
+                location=location,
+                title=read.title,
+                publisher=info.get("publisher", ""),
+                published_at=info.get("published_at", ""),
+                accessed_at=utcnow_iso(),
+                license_status=info.get("license_status", "unknown"),
+                quality=float(info.get("quality", 0.5) or 0.5),
+                quality_basis=info.get("quality_basis", ""),
+                freshness_status=info.get("freshness_status", "unknown"),
+                content_hash=read.content_hash,
+                fetch_ok=True,
+                metadata={"bytes": read.bytes_read, "doc_type": read.doc_type, "topic": topic},
+            )
+            self.metadata.insert("sources", source.to_row())
+            source_id_value = source.source_id
+            quality_value = source.quality
+            superseded = 0
 
         document_id = new_id("doc")
         content_path = Path(self.rt.config.paths.documents_dir) / f"{document_id}.txt"
@@ -622,7 +781,7 @@ class LearningOrchestrator:
         document = Document(
             document_id=document_id,
             project_id=project_id,
-            source_id=source.source_id,
+            source_id=source_id_value,
             title=read.title,
             doc_type=read.doc_type,
             language=info.get("language", "unknown"),
@@ -631,29 +790,97 @@ class LearningOrchestrator:
             char_count=len(read.text),
             parser=read.doc_type,
             parse_status="parsed",
+            stages={
+                "registered": True,
+                "fetched": True,
+                "parsed": True,
+                "extracted": False,
+                "classified": False,
+                "indexed": False,
+                "retrieval_verified": False,
+                "task_verified": False,
+            },
         )
         self.metadata.insert("documents", document.to_row())
         return {
-            "source_id": source.source_id,
+            "source_id": source_id_value,
             "document_id": document_id,
-            "location": read.location,
+            "location": location,
             "chars": len(read.text),
             "source_type": read.source_type,
-            "quality": source.quality,
+            "quality": quality_value,
+            "unchanged": False,
+            "superseded_documents": superseded,
         }
+
+    def _supersede_documents(self, project_id: str, source_id: str, *, reason: str) -> int:
+        """来源内容变更时，把旧文档与其片段标为 superseded（不删除，保留历史）。"""
+
+        if not source_id:
+            return 0
+        docs = self.metadata.query_dicts(
+            "SELECT * FROM documents WHERE project_id=? AND source_id=? AND parse_status<>'superseded'",
+            (project_id, source_id),
+        )
+        now = utcnow_iso()
+        count = 0
+        for doc in docs:
+            stages = self._parse_stages(doc.get("stages"))
+            stages["superseded"] = True
+            self.metadata.update(
+                "documents",
+                doc["document_id"],
+                {"parse_status": "superseded", "stages": stages, "error": reason},
+            )
+            for chunk in self.metadata.query_dicts(
+                "SELECT chunk_id, metadata FROM chunks WHERE document_id=? AND invalidated_at=''",
+                (doc["document_id"],),
+            ):
+                meta = chunk.get("metadata") or {}
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except ValueError:
+                        meta = {}
+                meta = dict(meta)
+                meta["invalidated_reason"] = reason
+                self.metadata.update_chunk(
+                    chunk["chunk_id"],
+                    {
+                        "status": KnowledgeStatus.SUPERSEDED.value,
+                        "invalidated_at": now,
+                        "metadata": meta,
+                    },
+                )
+                count += 1
+        return count
 
     def _task_extract(self, task: Mapping[str, Any], *, use_model: bool) -> Dict[str, Any]:
         project = self.metadata.get_project(task["project_id"])
         if not project:
             raise ValueError("项目不存在")
         topic = str((task.get("inputs") or {}).get("topic") or "")
-        docs = self.metadata.query_dicts(
+        candidates = self.metadata.query_dicts(
             "SELECT * FROM documents WHERE project_id=? AND parse_status='parsed' ORDER BY created_at LIMIT ?",
-            (project["project_id"], self.cfg.max_sources_per_task),
+            (project["project_id"], self.cfg.max_sources_per_task * 4),
         )
+        # 按主题取文档：历史实现不区分主题，第一个 EXTRACT 会吃光项目里所有
+        # parsed 文档，其余主题空转却记 completed（审计 H-01）。
+        if topic:
+            tagged, untagged = [], []
+            for doc in candidates:
+                source = self.metadata.get("sources", doc.get("source_id") or "") or {}
+                if self._document_topic(source) == topic:
+                    tagged.append(doc)
+                elif not self._document_topic(source):
+                    untagged.append(doc)
+            candidates = tagged or untagged
+        docs = candidates[: self.cfg.max_sources_per_task]
         added = 0
         processed = 0
         warnings: List[str] = []
+        timeout_s = int(task.get("timeout_s") or self.cfg.max_task_seconds)
+        started = time.monotonic()
         for doc in docs:
             try:
                 text = Path(doc["content_path"]).read_text(encoding="utf-8")
@@ -675,26 +902,56 @@ class LearningOrchestrator:
                 "title": doc.get("title") or source.get("title", ""),
                 "language": doc.get("language", "unknown"),
             }
+            if self._task_timed_out(task, started):
+                warnings.append(f"任务超过 timeout_s={timeout_s}s，已处理 {processed}/{len(docs)} 个文档后中止")
+                break
             extraction = self.rt.extractor.extract(
                 project=project, document=payload, topic=topic, use_model=use_model
             )
             drafts = extraction["drafts"]
+            doc_warnings = list(extraction.get("warnings", []))
+            warnings.extend(doc_warnings)
+            stages = self._parse_stages(doc.get("stages"))
+            stages.setdefault("registered", True)
+            stages.setdefault("fetched", True)
+            stages.setdefault("parsed", True)
             if drafts:
                 result = self.store.add_chunks(drafts)
                 added += int(result.get("added", 0)) + int(result.get("updated", 0))
-            warnings.extend(extraction.get("warnings", []))
-            self.metadata.update("documents", doc["document_id"], {"parse_status": "extracted"})
+                stages.update({"extracted": True, "classified": True, "indexed": True})
+                self.metadata.update(
+                    "documents",
+                    doc["document_id"],
+                    {"parse_status": "extracted", "stages": stages, "error": ""},
+                )
+            else:
+                # 零产出不是"成功"：明确记录 no_knowledge 与原因，便于追查
+                stages.update({"extracted": False, "zero_yield": True})
+                self.metadata.update(
+                    "documents",
+                    doc["document_id"],
+                    {
+                        "parse_status": "no_knowledge",
+                        "stages": stages,
+                        "error": "；".join(doc_warnings)[:500] or "未提取到知识",
+                    },
+                )
             processed += 1
 
         if added:
             self.metadata.record_metric("knowledge", "added", added, project["project_id"])
-        return {
+        payload: Dict[str, Any] = {
             "new_knowledge": added,
-            "progress": processed > 0,
+            "progress": processed > 0 and added > 0,
             "documents_processed": processed,
             "chunks_added": added,
             "warnings": warnings[:20],
         }
+        if processed and added == 0:
+            payload["reason"] = "；".join(warnings)[:300] or "所有文档均未提取到知识"
+        elif not processed:
+            payload["reason"] = f"没有属于主题「{topic}」的待提取文档" if topic else "没有待提取文档"
+        return payload
 
     def _task_verify(self, task: Mapping[str, Any]) -> Dict[str, Any]:
         project_id = task["project_id"]
@@ -709,7 +966,12 @@ class LearningOrchestrator:
         attempted = 0
         failures: List[Dict[str, Any]] = []
         warnings: List[str] = []
+        timeout_s = int(task.get("timeout_s") or self.cfg.max_task_seconds)
+        started = time.monotonic()
         for chunk in chunks:
+            if self._task_timed_out(task, started):
+                warnings.append(f"任务超过 timeout_s={timeout_s}s，已核验 {attempted}/{len(chunks)} 条后中止")
+                break
             attempted += 1
             try:
                 outcome = self.rt.verifier.verify(chunk["chunk_id"])
@@ -776,7 +1038,18 @@ class LearningOrchestrator:
                     expected=spec.get("expected"),
                 )
                 executed += 1
-                results.append({"practice_id": item["practice_id"], "result": outcome["result"]})
+                promoted = ""
+                if outcome["result"] == "pass":
+                    promoted = self._mark_practiced(
+                        item["chunk_id"], method="formula_recompute", practice_id=item["practice_id"]
+                    )
+                results.append(
+                    {
+                        "practice_id": item["practice_id"],
+                        "result": outcome["result"],
+                        "status_after": promoted or None,
+                    }
+                )
             elif item["kind"] == "code_example":
                 if self.rt.permissions.mode != "lab":
                     skipped.append(
@@ -796,11 +1069,17 @@ class LearningOrchestrator:
                         project_id=project_id,
                     )
                     executed += 1
+                    promoted = ""
+                    if payload.get("ok"):
+                        promoted = self._mark_practiced(
+                            item["chunk_id"], method="code_test", practice_id=item["practice_id"]
+                        )
                     results.append(
                         {
                             "practice_id": item["practice_id"],
                             "ok": payload.get("ok"),
                             "exit_code": payload.get("exit_code"),
+                            "status_after": promoted or None,
                         }
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -815,6 +1094,100 @@ class LearningOrchestrator:
             "results": results[:10],
             "skipped": skipped[:10],
         }
+
+    def _mark_practiced(self, chunk_id: str, *, method: str, practice_id: str) -> str:
+        """实践成功 → practiced（L4）。以前 practiced 是死状态，从来没有写入点。"""
+
+        row = self.metadata.get_chunk(chunk_id)
+        if not row:
+            return ""
+        chunk = chunk_from_dict(row)
+        if chunk.status not in {
+            KnowledgeStatus.VERIFIED.value,
+            KnowledgeStatus.PENDING_VERIFICATION.value,
+        }:
+            return chunk.status
+        self.metadata.add_verification(
+            VerificationRecord(
+                record_id=new_id("vrf"),
+                chunk_id=chunk_id,
+                method=method,
+                result="pass",
+                evidence=[
+                    {
+                        "kind": "practice_result",
+                        "practice_id": practice_id,
+                        "source_id": row.get("source_id", ""),
+                    }
+                ],
+                notes=f"实践执行成功（{method}）",
+                verifier="system",
+            ).to_row()
+        )
+        records = [
+            VerificationRecord(**{k: r[k] for k in VerificationRecord.__dataclass_fields__ if k in r})
+            for r in self.metadata.list_verifications(chunk_id)
+        ]
+        decision = evaluate_transition(chunk, KnowledgeStatus.PRACTICED.value, records)
+        if not decision.allowed:
+            return chunk.status
+        chunk.status = KnowledgeStatus.PRACTICED.value
+        self.metadata.update_chunk(
+            chunk_id,
+            {
+                "status": chunk.status,
+                "level": compute_level(chunk, records),
+                "updated_at": utcnow_iso(),
+            },
+        )
+        return KnowledgeStatus.PRACTICED.value
+
+    def _mark_evaluated(self, project_id: str, *, run_id: str, goal_met: bool) -> int:
+        """已实践且无未决冲突的知识 → evaluated（L5）。"""
+
+        rows = self.metadata.list_chunks(
+            ChunkFilter(project_id=project_id, statuses=[KnowledgeStatus.PRACTICED.value]), limit=50
+        )
+        if not rows:
+            return 0
+        conflicted = {
+            c["chunk_id"]
+            for c in self.metadata.query_dicts(
+                "SELECT chunk_a AS chunk_id FROM conflicts WHERE project_id=? AND status='open' "
+                "UNION SELECT chunk_b AS chunk_id FROM conflicts WHERE project_id=? AND status='open'",
+                (project_id, project_id),
+            )
+        }
+        promoted = 0
+        for row in rows:
+            chunk = chunk_from_dict(row)
+            meta = self._parse_json_obj(chunk.metadata)
+            if isinstance(meta, dict) and meta.get("invalidated_reason"):
+                continue
+            meta = dict(meta) if isinstance(meta, dict) else {}
+            meta["evaluation"] = {"run_id": run_id, "goal_met": bool(goal_met)}
+            records = [
+                VerificationRecord(**{k: r[k] for k in VerificationRecord.__dataclass_fields__ if k in r})
+                for r in self.metadata.list_verifications(chunk.chunk_id)
+            ]
+            chunk.metadata = meta
+            decision = evaluate_transition(chunk, KnowledgeStatus.EVALUATED.value, records)
+            if not decision.allowed:
+                continue
+            if row["chunk_id"] in conflicted:
+                continue
+            chunk.status = KnowledgeStatus.EVALUATED.value
+            self.metadata.update_chunk(
+                chunk.chunk_id,
+                {
+                    "status": chunk.status,
+                    "level": compute_level(chunk, records),
+                    "metadata": meta,
+                    "updated_at": utcnow_iso(),
+                },
+            )
+            promoted += 1
+        return promoted
 
     def _task_evaluate(self, task: Mapping[str, Any]) -> Dict[str, Any]:
         project_id = task["project_id"]
@@ -833,9 +1206,13 @@ class LearningOrchestrator:
                 created += len(self.rt.planner.tasks_for_conflict(project, conflict))
             except Exception:  # noqa: BLE001
                 continue
+        evaluated = self._mark_evaluated(
+            project_id, run_id=str(task.get("run_id") or ""), goal_met=bool(evaluation["goal_met"])
+        )
         return {
             "new_knowledge": 0,
             "progress": True,
+            "evaluated_chunks": evaluated,
             "goal_met": evaluation["goal_met"],
             "coverage_rate": evaluation["metrics"]["coverage_rate"],
             "verification_rate": evaluation["metrics"]["verification_rate"],
@@ -985,6 +1362,16 @@ class LearningOrchestrator:
                     "level": LearningLevel.L2.value,
                     "visibility": default_visibility(partition),
                     "license_status": license_status or "unknown",
+                    # 结构化知识字段（工具可显式提供；缺省不伪造）
+                    "tags": list(item.get("tags") or []),
+                    "source_version": str(item.get("source_version") or ""),
+                    "source_excerpt": str(item.get("source_excerpt") or content[:300]),
+                    "core_principle": str(item.get("core_principle") or ""),
+                    "reasoning": str(item.get("reasoning") or ""),
+                    "application": str(item.get("application") or ""),
+                    "implementation": str(item.get("implementation") or ""),
+                    "anti_patterns": str(item.get("anti_patterns") or ""),
+                    "limitations": str(item.get("limitations") or ""),
                     "metadata": item.get("metadata") or {"extraction_method": "tool"},
                 }
             )

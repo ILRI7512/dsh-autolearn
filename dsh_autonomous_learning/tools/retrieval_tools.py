@@ -36,12 +36,14 @@ def _require(
     if decision.allowed and not decision.needs_confirmation:
         return
     if decision.needs_confirmation and not args.get("confirm_token"):
-        request = rt.permissions.request_confirmation(action, target, project_id)
+        # 生成请求但不回传令牌：令牌一旦进入模型上下文，
+        # "用户确认"就等于把批准权交给了模型自己。
+        rt.permissions.request_confirmation(action, target, project_id)
         raise ToolError(
-            f"该操作需要用户确认：{action}。确认方式二选一："
-            f"(1) 在 DSH 审批界面批准该工具调用（宿主开启 delegate_approval_to_host 时自动生效）；"
-            f"(2) 由用户运行 `python -m dsh_autonomous_learning.main confirmations approve {request.token}`，"
-            f"再把该 token 作为 confirm_token 重试。",
+            f"该操作需要用户确认：{action}。请在 DSH 审批界面批准；"
+            "或由用户在交互终端运行 "
+            "`python -m dsh_autonomous_learning.main confirmations list` "
+            "查看待确认请求并批准。批准后由用户把确认令牌传回本工具。",
             "ConfirmationRequired",
         )
     if not decision.allowed:
@@ -371,8 +373,9 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
     )
 
     def search_knowledge(args: Dict[str, Any]) -> Dict[str, Any]:
+        project_id = args.get("project_id") or None
         filters = ChunkFilter(
-            project_id=args.get("project_id") or None,
+            project_id=project_id,
             partitions=args.get("partitions"),
             domains=args.get("domains"),
             topics=args.get("topics"),
@@ -383,7 +386,11 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
             min_confidence=args.get("min_confidence"),
             updated_after=args.get("updated_after"),
         )
-        if args.get("include_global") and args.get("project_id"):
+        if not project_id and not bool(args.get("include_all_projects")):
+            # 没给项目就必须显式跨项目检索：默认只返回 visibility=global 的知识，
+            # 否则任何一次检索都会把其他项目的私有知识带走（审计 H-06）。
+            filters.visibility = "global"
+        elif args.get("include_global") and project_id:
             filters.visibility = None  # 由 store 的 project/global 规则处理
         return rt.store.search(
             args["query"],
@@ -413,6 +420,7 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
                     "updated_after": {"type": "string"},
                     "include_content": {"type": "boolean"},
                     "include_global": {"type": "boolean"},
+                    "include_all_projects": {"type": "boolean"},
                     "mode": {"type": "string", "enum": ["hybrid", "vector", "keyword"]},
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 100},
                 },
@@ -646,6 +654,14 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
 
     def export_knowledge(args: Dict[str, Any]) -> Dict[str, Any]:
         path = args.get("path") or str(Path(rt.config.paths.data_dir) / "exports" / "knowledge.jsonl")
+        _require(
+            rt,
+            args,
+            action="export_knowledge",
+            risk="write",
+            target=str(path),
+            project_id=str(args.get("project_id") or ""),
+        )
         filters = ChunkFilter(project_id=args.get("project_id") or None)
         return rt.store.export(path, fmt=args.get("format", "jsonl"), filters=filters)
 
@@ -670,6 +686,14 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
 
     def backup(args: Dict[str, Any]) -> Dict[str, Any]:
         dest = args.get("dest_dir") or str(Path(rt.config.paths.data_dir) / "backups")
+        _require(
+            rt,
+            args,
+            action="backup_knowledge_base",
+            risk="write",
+            target=str(dest),
+            project_id=str(args.get("project_id") or ""),
+        )
         return rt.store.backup(dest, note=str(args.get("note") or ""))
 
     reg.register(

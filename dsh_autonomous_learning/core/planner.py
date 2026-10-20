@@ -17,16 +17,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..config import LearningConfig
+from ..domains import REGISTRY
 from ..storage.metadata_store import MetadataStore
 from .model_adapter import BaseModel
 from .models import Task, TaskKind, TaskStatus, new_id
 
+#: 主题模板来自领域注册表（新增领域无需改这里）。
+#: 保留一个快照常量只是为了向后兼容与内省；真正的取值走 REGISTRY。
 DOMAIN_TEMPLATES: Dict[str, List[str]] = {
-    "uiux": ["设计原则与规范", "组件与交互模式", "可用性与无障碍", "视觉与排版", "设计流程与交付"],
-    "quant": ["数据质量与预处理", "策略与信号构造", "回测方法与偏差", "风险管理与仓位", "交易成本与执行"],
-    "finance": ["基础概念与术语", "市场结构与参与者", "风险、杠杆与保证金", "工具与产品差异"],
-    "programming": ["语言核心与类型系统", "工程结构与依赖管理", "测试、调试与可观测性", "性能与并发", "生态与工具链"],
-    "general": ["基础概念与定义", "核心原理与机制", "方法与流程", "常见风险与误区", "实践案例"],
+    spec.key: list(spec.topic_templates) for spec in REGISTRY.all()
 }
 
 DEPTH_TOPIC_LIMIT = {"overview": 3, "working": 5, "deep": 8}
@@ -56,7 +55,7 @@ class LearningPlanner:
     ) -> Dict[str, Any]:
         limit = DEPTH_TOPIC_LIMIT.get(depth, 5)
         topics: List[Topic] = []
-        template = DOMAIN_TEMPLATES.get(domain, DOMAIN_TEMPLATES["general"])
+        template = REGISTRY.topic_templates(domain) or REGISTRY.topic_templates("general")
         for name in template[:limit]:
             topics.append(Topic(name=name, origin="template"))
 

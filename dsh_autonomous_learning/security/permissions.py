@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -65,6 +66,17 @@ class PermissionDecision:
         }
 
 
+def _looks_like_path(target: str) -> bool:
+    """区分"文件路径"与"分区名/chunk_id"这类普通字符串目标。"""
+
+    value = (target or "").strip()
+    if not value or value.startswith(("http://", "https://")):
+        return False
+    if value.startswith(("/", "~", "./", "../")):
+        return True
+    return os.sep in value and not value.startswith("action:")
+
+
 def contains_secret(text: str) -> Optional[str]:
     """返回命中的秘密模式描述，未命中返回 None。"""
 
@@ -100,14 +112,19 @@ class PermissionManager:
         # 心跳文件才会新鲜。插件被禁用/崩溃时心跳过期，本插件自动退回本地令牌流程
         # （fail-closed），避免"以为有人审批、其实无人把关"的漏洞。
         if delegate_to_host is None:
-            if security.delegate_approval_to_host:
-                delegate_to_host = True
-            else:
-                env = os.environ.get("DSH_AL_HOST_APPROVAL", "").strip().lower()
-                env_wants = env in {"1", "true", "yes", "on"}
+            env = os.environ.get("DSH_AL_HOST_APPROVAL", "").strip().lower()
+            # 环境变量与配置开关都只是"愿意委派"的意图声明，**不能**作为
+            # 委派依据：它们由插件 bundle 无条件注入，被禁用/崩溃的闸门同样能让
+            # 它们为真。唯一判据是闸门此刻是否真的在运行（安装 + 未禁用 + 心跳）。
+            env_wants = env in {"1", "true", "yes", "on"} or bool(
+                security.delegate_approval_to_host
+            )
+            try:
                 available = env_wants and self._host_gate_available()
-                delegate_to_host = bool(available)
-                if env_wants and not delegate_to_host:
+            except Exception:  # noqa: BLE001 - 探测失败一律按不可用处理
+                available = False
+            delegate_to_host = bool(available)
+            if env_wants and not delegate_to_host:
                     self.audit.log(
                         action="host_approval_unavailable",
                         target=str(self.heartbeat_path or ""),
@@ -179,9 +196,10 @@ class PermissionManager:
             return 0
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            return int(payload.get("generation", 0))
+            return max(0, int(payload.get("generation", 0)))
         except (OSError, ValueError, TypeError):
-            return 0
+            # 标记损坏：无法确认是旧代闸门，按"需要心跳"的新代处理（fail-closed）
+            return 2
 
     def _host_gate_enabled(self) -> bool:
         """profile patch 里是否被显式 disabled。
@@ -195,8 +213,11 @@ class PermissionManager:
         patch = profile / "cordis.patch.yml"
         try:
             text = patch.read_text(encoding="utf-8")
-        except OSError:
+        except FileNotFoundError:
             return True
+        except OSError:
+            # 文件存在但读不出来：无法证明闸门启用 → 按未启用处理
+            return False
         match = re.search(
             r"(?ms)^-\s*id:\s*autolearn-approval\s*$(.*?)(?=^-\s*id:|\Z)", text
         )
@@ -328,6 +349,14 @@ class PermissionManager:
             return PermissionDecision(True, "读取操作允许", risk=risk)
 
         if risk == RiskLevel.WRITE.value:
+            # 写入也要有路径边界：导出/备份/恢复的 path 直接来自调用方，
+            # 不校验就等于"任意文件覆盖"（审计 H-04 / SEC-03）。
+            if _looks_like_path(target) and not self.path_allowed(target):
+                return PermissionDecision(
+                    False,
+                    f"写入路径不在允许范围内（仅允许 data 目录与授权根目录）: {target}",
+                    risk=risk,
+                )
             if self.delegate_to_host:
                 return PermissionDecision(True, "写入允许（高风险动作由 DSH 宿主审批把关）", risk=risk)
             if mode == AutonomyMode.ASSISTED.value:
@@ -401,6 +430,9 @@ class PermissionManager:
 
     def request_confirmation(self, action: str, target: str = "", project_id: str = "") -> PermissionDecision:
         token = secrets.token_urlsafe(18)
+        # target 为空时无法在消费阶段做绑定，这里用 action 兜底，
+        # 避免"同 action 的任意 target 都能复用令牌"。
+        target = target or f"action:{action}"
         expires_at = self._expires_at()
         if self.metadata is not None:
             self.metadata.add_confirmation(
@@ -435,15 +467,36 @@ class PermissionManager:
             project_id=project_id,
             detail={"token_issued": True, "ttl_s": CONFIRM_TTL_SECONDS, "persisted": self.metadata is not None},
         )
+        # 注意：令牌**不得**出现在 reason 里。reason 会被工具层直接拼进返回给
+        # 模型的错误消息；一旦模型拿到令牌，而 CLI 又能被模型调用，"用户确认"
+        # 就退化成了"模型自批"。
         return PermissionDecision(
             True,
-            f"需要用户确认：{action}。请在 DSH 审批界面或运行 "
-            f"`python -m dsh_autonomous_learning.main confirmations approve {token}` 后重试。",
+            f"需要用户确认：{action}。请在 DSH 审批界面批准，"
+            "或由用户在交互终端运行 `python -m dsh_autonomous_learning.main "
+            "confirmations list` 查看待确认请求并批准。",
             needs_confirmation=True,
             token=token,
         )
 
-    def approve(self, token: str) -> bool:
+    def approve(self, token: str, *, actor: str = "user", require_tty: bool = False) -> bool:
+        """批准一个待确认请求。
+
+        调用者身份校验：
+        - ``require_tty=True`` 时必须是交互终端（人坐在前面），供 CLI 使用；
+        - 宿主审批 UI 等受信任通道可传 ``require_tty=False``；
+        - 智能体的工具通道**没有**批准入口（见 tools 注册表）。
+        """
+
+        if require_tty and not sys.stdin.isatty():
+            self.audit.log(
+                action="approve_denied_non_tty",
+                target=token[:6] + "…",
+                risk=RiskLevel.DESTRUCTIVE.value,
+                allowed=False,
+                detail={"reason": "非交互环境不允许批准高风险操作", "actor": actor},
+            )
+            return False
         if self.metadata is not None:
             row = self.metadata.get_confirmation(token)
             if not row or row["status"] != "pending" or _expired(row.get("expires_at", "")):
