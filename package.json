@@ -1,18 +1,38 @@
 {
   "name": "dsh-autolearn",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "DSH autonomous-learning plugins: MCP engine registration, approval gate, settings card.",
+  "type": "module",
+  "description": "DSH autonomous-learning plugin: TypeScript engine, native DSH tools, optional MCP adapter.",
   "packageManager": "pnpm@11.21.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./mcp": "./dist/adapters/mcp/server.js",
+    "./dsh": "./dist/adapters/dsh/plugin.js"
   },
   "scripts": {
-    "syntax": "node --check plugins/approval/index.js && node --check plugins/autolearn/index.js && node --check plugins/autolearn/client.js",
-    "check": "node plugins/approval/decision_test.mjs && node plugins/autolearn/settings_test.mjs && node plugins/autolearn/route_test.mjs",
-    "test": "pnpm run syntax && pnpm run check",
-    "py:install": "python -m pip install -r dsh_autonomous_learning/requirements.txt",
-    "py:test": "python -m pytest dsh_autonomous_learning/tests"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-concurrency=1 tests/unit/*.test.ts tests/integration/*.test.ts tests/security/*.test.ts tests/regression/*.test.ts",
+    "test:unit": "node --test tests/unit/*.test.ts",
+    "mcp": "node dist/adapters/mcp/server.js",
+    "cli": "node dist/cli.js"
   },
-  "license": "MIT"
+  "dsh": {
+    "bundle": {
+      "patch": "./plugins/autolearn/cordis.patch.yml"
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^24.10.0"
+  },
+  "license": "MIT",
+  "bin": {
+    "dsh-autolearn": "./dist/cli.js"
+  }
 }

@@ -1,121 +1,227 @@
-# dsh-autolearn · DSH 自主学习插件
+# dsh-autolearn · DSH 自主学习插件（v2.0 / TypeScript）
 
 把「学习目标 → 有界学习任务 → 可追溯知识库 → 证据核验 → 冲突检测 → 评估报告」
-做成 DeepSeek Harness 可用的插件：一个 Python 引擎 + 两个 Cordis 插件包。
+做成 DeepSeek Harness 的原生工具插件：**一个 TypeScript 引擎，两个可选入口**。
 
-> 状态：v1.2.0。Python 侧 **197 项 pytest 全过**；MCP 侧 63 个工具；
-> assisted 高风险操作接 DSH 原生审批弹窗（无活闸门时 fail-closed 退回本地令牌）；
-> 插件页带设置卡；仓库内不含任何机器专属绝对路径。
+> 状态：v2.0.0。
+> - 业务逻辑全部在 TypeScript（`src/`，11,126 行，46 模块），**生产运行时 0 个外部依赖**；
+> - 11 个 DSH 原生工具（由 60 个 MCP 工具收敛而来）+ 1 个用户侧 CLI；
+> - 保留可选 MCP 适配器（默认关闭，调用同一引擎）；
+> - 数据库 schema 与 v1.2 完全兼容（v7），旧知识库可直接打开；
+> - 测试：**148 项 node:test 全过**；旧 Python 实现保留为 legacy（197 项 pytest 仍可跑）。
 >
-> v1.2 要点：写入读-合并-写（状态不会被覆盖降级）、内容指纹去耦 + 活跃片段唯一、
-> 领域注册表（新增领域只调一次 `register_domain`）、增量更新（条件请求 + 变更失效）、
-> embedding 缓存、可解释质量分、L4/L5 真实写入、JSONL 运行日志与可校验备份。
-> 详见 `docs/架构审计报告-2026-10-20.md` 与 `docs/交付报告-v1.2.md`。
+> 详细审计、依赖地图、迁移状态与实测数据见 `docs/refactor/`。
 
-## 仓库结构
+## 架构
 
 ```
-dsh_autonomous_learning/    # Python 引擎（可独立运行，也可作为 MCP stdio 服务器）
-  core/ sources/ knowledge/ storage/ practice/ security/ tools/
-  tests/                    # 96 项 pytest
-  examples/                 # 端到端演示 + MCP 握手
-  docs/                     # 交付报告、演示与测试输出
-  plugin.py main.py config.py
-plugins/autolearn/          # DSH 插件 1：注册 MCP 服务器 + 设置卡（bundle）
-plugins/approval/           # DSH 插件 2：高风险调用审批闸门（Host 插件）
-scripts/check-env.ps1       # 环境自检 + 安装提示（只打印，不写路径）
+DSH Agent
+   │  ctx.tools.register（原生 JSON Schema + 运行时校验）
+   ▼
+adapters/dsh（11 工具 + 审批 hook）   adapters/mcp（可选）   cli（用户侧）
+   └──────────────┬───────────────────────┬───────────────┘
+                  ▼
+        application/services（唯一业务门面）
+                  ▼
+  Learning · Knowledge · Retrieval · Verification · Practice · Security · Storage
+                  ▼
+        node:sqlite（WAL/FTS 无关的自建倒排 + float32 向量索引）
 ```
 
-## 路径约定（没有硬编码路径）
+- 0 个运行时循环依赖（脚本实测）。
+- 业务逻辑不依赖 MCP 协议；原生与 MCP 入口调用同一套 `AutolearnServices`。
+- 所有资源（SQLite 连接、索引文件锁、hook）在插件卸载时释放。
 
-运行期需要知道的“路径”全部来自环境变量或从插件自身位置推导：
+## 环境要求
 
-| 变量 | 用途 | 缺省行为 |
+| 项 | 要求 |
+| --- | --- |
+| Node.js | **≥ 22.6**（使用内置 `node:sqlite` 与原生 TypeScript 运行测试） |
+| DSH | 支持 Cordis 插件与 `ctx.tools` 的版本（本仓库验证于 0.2.0-rc.2 契约） |
+| Python | **不需要**（legacy 目录仅作参考） |
+| 构建 | TypeScript 5.9（devDependency） |
+
+## 安装与构建
+
+```bash
+# 1) 类型检查 + 构建（产出 dist/）
+pnpm install            # 常规环境
+pnpm run typecheck
+pnpm run build
+
+# 若仓库位于 FAT/exFAT/共享存储（不支持 symlink），pnpm 会失败：
+#   npm i -g typescript && tsc -p tsconfig.build.json
+```
+
+把插件 link 进 DSH profile（路径按你的仓库位置替换）：
+
+```bash
+dsh plugin --profile web add link:/path/to/dsh-autolearn/plugins/autolearn
+```
+
+并在 profile 的 `package.json` 中确认：
+
+```json
+{
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "...", "@local/dsh-autolearn"] } }
+}
+```
+
+重启 DSH 后，模型可见工具为 `learning_create` / `learning_run` / `knowledge_search` 等 11 个。
+
+### 引擎目录与旧数据
+
+默认按以下顺序解析引擎目录（`DSH_AL_HOME` 可覆盖）：
+
+1. `DSH_AL_HOME`
+2. `<repo>/config.json` 存在 → 仓库根
+3. `<repo>/dsh_autonomous_learning/config.json` 存在 → **legacy 引擎目录**（v1.2 的 `data/` 在这里）
+4. 仓库根
+
+因此升级不会丢旧知识库；新目录也可以直接指向 `data/`。
+
+| 环境变量 | 用途 | 缺省 |
 | --- | --- | --- |
-| `DSH_AL_WORKDIR` | 仓库根（MCP 行的 cwd / PYTHONPATH） | `process.cwd()` |
-| `DSH_AL_HOME` | 引擎目录（data/ 所在） | 插件从自身位置向上查找 `dsh_autonomous_learning/` |
-| `DSH_AL_PYTHON` | Python 解释器 | `python`（Windows）/ `python3`（其它） |
-| `DSH_AL_SETTINGS_FILE` | 设置卡文件覆盖 | `<engine>/data/settings.json` |
-| `DSH_AL_HOST_APPROVAL` | 是否把审批交给宿主 | MCP 行里固定为 `1` |
+| `DSH_AL_HOME` | 引擎目录（config.json / data/） | 自动探测（见上） |
+| `DSH_AL_DATA_DIR` | 数据目录覆盖 | `<home>/data` |
+| `DSH_AL_MODE` | assisted / auto / lab | 配置文件 |
+| `DSH_AL_ALLOW_NETWORK` | 是否允许外部抓取 | `false` |
+| `DSH_AL_CONFIG` | 配置文件路径 | `<home>/config.json` |
+| `DSH_AL_SETTINGS_FILE` | 设置卡文件覆盖 | `<home>/data/settings.json` |
+| `DSH_AL_LOG_LEVEL` | DEBUG/INFO/WARNING/ERROR | `INFO` |
 
-## pnpm 工作区
+> 设置卡（DSH 插件设置页）修改的模式/每日预算/任务上限会在**下一轮开始时**生效（引擎重读 `settings.json`）；`dataDir` 变更需要重启。
+
+## 11 个原生工具
+
+| 工具 | 作用 | 风险 |
+| --- | --- | --- |
+| `learning_create` | 建项目 + 生成主题任务链（discover→extract→verify→practice + 缺口/评估/报告） | write |
+| `learning_run` | 跑一轮有界学习（预算/时长/任务数/停滞停止；失败重试与依赖阻塞） | write |
+| `learning_status` | 项目/任务/覆盖率/核验率/未达标项/最近运行/缺口 | read |
+| `knowledge_search` | BM25 + 特征哈希向量 + RRF 混合检索，带核验/冲突/时效/许可警告 | read |
+| `knowledge_manage` | save / update / invalidate / rollback / export / get / partitions | write（invalidate/rollback 需确认） |
+| `knowledge_verify` | verify / verify_formula / list_evidence / find_duplicates / detect_conflicts | read |
+| `source_manage` | discover / read / list（SSRF 防护、域名白名单、体积/超时限制） | read/external |
+| `learning_evaluate` | 覆盖率/核验率/来源完整率/冲突/实践通过率/成本 + 可选报告 | read |
+| `learning_review` | 失败/阻塞/耗尽重试/冲突/缺口复盘；可重置失败任务（需确认） | read/write |
+| `system_diagnostics` | 数据库/外键/索引一致性、schema、权限、网络策略、最近拒绝 | read |
+| `system_maintenance` | integrity / rebuild_index / backup / verify_backup / restore / delete_chunk / vacuum | **destructive（宿主审批）** |
+
+审批：
+- DSH 原生工具：`tools/pre-execute` 返回 `{kind:'ask'}`，用户拒绝则不执行；判定异常**失败关闭**。
+- MCP / CLI：使用本地确认令牌（作用域 = action + target、15 分钟有效、单次消费）。
+
+## 用户侧 CLI
 
 ```bash
-pnpm install      # 链接两个 plugins/* 工作区包，生成 pnpm-lock.yaml
-pnpm test         # node 语法检查 + 审批判定 / 设置读写 / 设置路由 三个自测
-pnpm py:test      # 96 项 pytest（需先 pnpm py:install）
+node dist/cli.js pending                 # 列出待确认操作
+node dist/cli.js approve <token>         # 批准（仅 user/CLI 通道）
+node dist/cli.js reject <token> [note]
+node dist/cli.js status [projectId]
+node dist/cli.js diagnostics
+node dist/cli.js search "滑点" <projectId>
 ```
 
-两个插件是工作区包 `@local/dsh-autolearn`、`@local/dsh-autolearn-approval`。
-发布 npm 前改 scope 并去掉 `private: true`。
-
-## 快速开始（只用引擎）
+## 可选 MCP 兼容层
 
 ```bash
-python -m pip install -r dsh_autonomous_learning/requirements.txt
-# 注意：MCP SDK 必须是 1.x（requirements.txt 已收窄为 mcp>=1.2,<2）；
-# 2.x 移除了 @server.list_tools / call_tool 装饰器，插件会启动即失败。
-PYTHONPATH=. python -m dsh_autonomous_learning.main --home dsh_autonomous_learning project-create \
-  --goal "学习外汇量化交易基础" --domain quant --plan
-PYTHONPATH=. python -m dsh_autonomous_learning.main --home dsh_autonomous_learning run --project prj_xxx
-PYTHONPATH=. python -m dsh_autonomous_learning.main --home dsh_autonomous_learning search --query "滑点"
+node dist/adapters/mcp/server.js   # stdio JSON-RPC 2.0
 ```
 
-Windows PowerShell 用 `$env:PYTHONPATH = (Resolve-Path .).Path` 代替 `PYTHONPATH=.`。
+支持 `initialize` / `tools/list` / `tools/call` / `ping`；工具与原生入口**完全同构**（同一 `buildNativeTools`），不复制业务逻辑。默认不启用，避免与原生入口同时写同一数据库。
 
-## 作为 DSH 插件安装
+MCP 客户端配置示例：
 
-1. 克隆仓库到任意位置（不需要改任何源文件）；
-2. 运行 `pwsh scripts/check-env.ps1` 自检（会打印安装命令）；
-3. 在 DSH 里安装两个 bundle：
-   - `plugin_manager install_bundle target=<repo>/plugins/autolearn`
-   - `plugin_manager install_bundle target=<repo>/plugins/approval`
-4. 重启 DSH（新模块代际），Agent 工具列表出现 `mcp__autolearn__*`（63 个）。
+```json
+{
+  "mcpServers": {
+    "autolearn": {
+      "command": "node",
+      "args": ["/path/to/dsh-autolearn/dist/adapters/mcp/server.js"],
+      "env": { "DSH_AL_HOME": "/path/to/dsh-autolearn/dsh_autonomous_learning" }
+    }
+  }
+}
+```
 
-插件行通过 `!!js` 读取环境变量组装 MCP 配置；两个 Host 插件也会从自身位置
-向上查找引擎目录。因此**仓库放哪都能跑**，只要保持 `plugins/*` 与
-`dsh_autonomous_learning/` 的相对位置（或显式设置 `DSH_AL_HOME`）。
+## 数据与兼容性
 
-安装后：
+- schema：v7（与 v1.2 相同 DDL、相同迁移链、相同唯一索引/JSON/BOOL 编码）。
+- 向量：`hashing:hashed-ngram:512`，BLAKE2b-64 特征哈希；旧 `vectors.npy` / `ids.json` / `manifest.json` 可读，TS 写入的索引旧版也可读。
+- 内容指纹、chunk_id、`normalizeText` 与旧版逐字节一致（跨语言去重/幂等）。
+- 备份：`system_maintenance(action=backup)` 产出 SQLite 在线备份 + 索引目录 + sha256 清单；恢复前自动写 `.pre-restore.sqlite3`。
+- 注意：文档正文存放在 `data/documents/`，**不在** DB 备份清单内，备份 data 目录时需整体复制。
 
-- **工具**：`mcp__autolearn__create_learning_project`、`run_learning_round`、`search_knowledge` …
-- **设置卡**：设置 → 插件 → 自主学习 → 运行模式 / 数据目录 / 每日预算；
-  写入 `<engine>/data/settings.json`，引擎每轮开始前重读。
-- **审批**：`execute` / `destructive`（以及 `update_knowledge` 等）弹 DSH 原生审批框；
-  审批是 user-only，智能体没有自我授权工具。
+## 安全默认值（与旧版差异处已加严）
+
+| 项 | 默认 | 说明 |
+| --- | --- | --- |
+| 网络 | **关闭** | `allow_network=true` 才允许抓取；仅 http/https + 80/443/8080/8443 |
+| SSRF | 默认拒绝私有/环回/链路本地/元数据/保留地址 | DNS 结果钉死到实际连接，逐跳重定向校验，防 rebinding |
+| 路径 | 只允许授权根 + data 目录 | realpath 解析，符号链接逃逸与 `../` 都会被拒 |
+| 密钥 | 写入知识库前扫描并拒绝 | `sk-*`/Bearer/AKIA/gh*/私钥等模式；日志脱敏 |
+| 审批失败 | **失败关闭** | 判定异常 → ask，不自动放行 |
+| 证据 | 无证据一律 fail | 观点/假设/未解决问题永远不能 verified；模型不能自称人工复核 |
+| 检索作用域 | 无 project 作用域时只返回 `visibility='global'` | 防跨项目泄漏 |
 
 ## 测试
 
 ```bash
-pnpm test                                   # 插件侧
-python -m pytest dsh_autonomous_learning/tests   # 引擎侧（PYTHONPATH=仓库根）
+npm test             # 148 tests / 31 suites（node:test）
+npm run typecheck    # strict TS
+python3 -m pytest dsh_autonomous_learning/tests -q   # legacy 基线：197 passed
 ```
 
-期望：Node 三个自测全过；Python `96 passed`。
+覆盖：类型检查、单元、数据库集成、知识与全文检索、向量/索引一致性、版本回滚、任务恢复、预算、权限、审批拒绝、SSRF、路径穿越、跨项目隔离、并发写、备份恢复、DSH 工具注册/卸载、MCP 真实子进程、CLI 审批、旧库兼容。
 
-## 安全边界（如实）
+## 故障恢复
 
-- 代码执行是**进程级隔离**（独立目录、`-I`、环境变量白名单、超时、输出上限），
-  **不是安全沙箱**；默认禁止执行不可信代码。
-- 网络默认关闭；不绕过登录/付费墙；不下载未知可执行文件。
-- 审批闸门 fail-closed：bundle 缺失、patch `disabled: true`、或代际心跳过期时，
-  引擎退回本地 `confirmations approve` 流程。
-- 不做 OCR、不做回测引擎；扫描版 PDF 与量化策略回测会明确报告“不支持/需外部工具”。
+| 症状 | 处理 |
+| --- | --- |
+| 索引与元数据不一致 | `system_maintenance(action=integrity)` 查看；`rebuild_index` 重建 |
+| 误删/误改知识 | `knowledge_manage(action=rollback, version=N)`；或从备份 `restore` |
+| 备份恢复被拒 | `verify_backup` 查看 issues（校验和/版本/清单）；校验失败时不会动原库 |
+| 任务卡在 running | 下一轮 `learning_run` 自动 `recover()`；也可等超时后重试 |
+| 插件加载失败 | 确认已 `pnpm build`（`dist/` 存在）、Node ≥22.6、`@local/dsh-autolearn` 在 bundles |
+| 需要回滚到 v1.2 | `git checkout baseline-python-v1.2`；数据库 v7 双向可读 |
 
-## 已知限制
+## 已知限制（不假装完成）
 
-- 语义向量默认仍是特征哈希（离线、确定性），同义改写召回有限；
-  接入 embedding 服务后需 `rebuild_vector_index` 并重跑检索评估集。
-- robots.txt 与抓取重试退避尚未实现（P8 清单里如实列出）。
-- 质量分权重为手工设定，未经标注数据校准，不应作为"质量已验证"的依据。
-- 真实 LLM 调用默认 mock，未在此仓库验证具体 provider。
-- 审批弹窗的实际点击验收未包含在自动测试中。
-- 设置卡模式/预算热生效；数据目录变更需重连 MCP 连接。
+1. **PDF/DOCX 解析未迁移**：会明确报错并建议转换为 Markdown/TXT；HTML 用正则清洗（非 DOM）。
+2. **模型辅助（规划/抽取提议）未迁移**：`use_model=true` 会返回明确警告，只走规则链路。
+3. **代码执行只支持 JavaScript**，仅 lab 模式、进程级隔离（不是安全沙箱）；Python 代码执行已移除。
+4. **调度 tick / 实验运行器 / 知识图谱查询 / 检索评测集**未迁移（表结构保留）。
+5. 哈希向量是**词汇级**召回，不是语义模型；未做检索质量评测，不宣称提升。
+6. 真实 DSH profile 启动验证被缺失模型凭据阻塞；插件注册由契约级测试 + MCP 子进程验证覆盖。
+7. `docs/refactor/audit.md` 记录了旧版 8 项安全缺陷与修复状态。
+
+## 目录结构
+
+```
+src/
+  index.ts                  # 引擎装配（唯一 DI 点）
+  cli.ts                    # 用户侧 CLI（审批/诊断/检索）
+  core/                     # 类型、错误、配置、校验、ID
+  security/                 # 权限、审批、路径、网络、预算、审计、密钥
+  infrastructure/
+    database/               # schema(v7)/迁移/连接/事务/备份
+    retrieval/              # 分词器 + BM25
+    embeddings/             # BLAKE2b / 特征哈希 / npy / 向量索引
+    sources/                # 发现 / 读取 / 解析 / 元数据
+  domain/
+    knowledge/              # 存储、提取、质量、领域/分区
+    learning/               # 状态机、规划、缺口、评估、编排、报告、仓储
+    practice/               # 练习生成、公式求值、受限执行
+  application/services.ts   # 11 个业务接口
+  adapters/dsh|mcp/         # 入口适配
+tests/{unit,integration,security,regression}/
+docs/refactor/              # 审计 / 依赖地图 / 迁移计划 / 阶段报告
+dsh_autonomous_learning/    # legacy v1.2（保留，非默认运行时；迁移完成后再删除）
+plugins/autolearn/          # Cordis 插件：设置卡 + 原生工具注册
+plugins/approval/           # legacy MCP 审批闸门（原生工具不再依赖它）
+```
 
 ## 许可
 
-本项目以 **MIT** 许可证发布，全文见 [LICENSE](LICENSE)。
-
-MIT 只覆盖本仓库自己的代码与文档。学习过程中引用的第三方资料（官方文档、规范原文、
-产品页面截图等）仍归原作者所有，许可证见各资源的 `license_notes` 字段；
-知识库中只保存归纳后的结论与来源链接，不复制原文全文或素材本体。
+MIT

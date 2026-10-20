@@ -14,7 +14,20 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const inject = ['webServer']
+// tools 是硬依赖（原生工具必须注册）；webServer 仅设置卡需要，按需探测，
+// 这样 headless / CLI profile 也能正常加载本插件。
+// dist 是构建产物：缺失时只禁用原生工具，设置卡仍然可用（不整体拖垮插件加载）。
+let applyNative = () => {
+  console.warn('[dsh-autolearn] dist 未构建：原生工具不可用，请先在仓库执行 pnpm build')
+}
+try {
+  const native = await import('../../dist/adapters/dsh/plugin.js')
+  applyNative = native.apply
+} catch (error) {
+  console.warn(`[dsh-autolearn] 原生适配器加载失败: ${error instanceof Error ? error.message : String(error)}`)
+}
+
+export const inject = ['tools']
 
 export const DEFAULTS = Object.freeze({
   mode: 'assisted',
@@ -195,6 +208,12 @@ export function settingsRoute(env = process.env) {
 export function apply(ctx, config = {}) {
   const env = { ...process.env, ...(config.env ?? {}) }
   let target = ''
+  // 原生工具是主入口：先注册业务工具（引擎由 dist/adapters/dsh/plugin.js 装配）。
+  try {
+    applyNative(ctx, { ...config, env })
+  } catch (error) {
+    console.error(`[dsh-autolearn] 原生工具注册失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
   try {
     target = settingsPath(env)
   } catch (error) {
@@ -208,10 +227,11 @@ export function apply(ctx, config = {}) {
   } catch (error) {
     console.warn(`[dsh-autolearn] settings bootstrap failed: ${error}`)
   }
-  if (!ctx?.webServer || typeof ctx.webServer.register !== 'function') {
+  const webServer = ctx?.webServer ?? ctx?.get?.('webServer')
+  if (!webServer || typeof webServer.register !== 'function') {
     console.warn('[dsh-autolearn] webServer unavailable; settings card API disabled')
     return
   }
-  ctx.effect(() => ctx.webServer.register(settingsRoute(env)), 'dsh-autolearn: settings route')
+  ctx.effect(() => webServer.register(settingsRoute(env)), 'dsh-autolearn: settings route')
   console.log(`[dsh-autolearn] settings API ready: ${target}`)
 }

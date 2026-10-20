@@ -1,23 +1,9 @@
-# 自主学习插件（配置型 bundle）：把 Python 引擎注册为 MCP stdio 服务器。
-# 不写死任何绝对路径：仓库根由 DSH_AL_WORKDIR 提供（缺省用 process.cwd()），
-# Python 解释器可用 DSH_AL_PYTHON 覆盖。引擎目录 = <DSH_AL_WORKDIR>/dsh_autonomous_learning。
-- insert:
-    - id: autolearn-mcp
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: autolearn
-        transport: stdio
-        # 注意：!!js 里含三元运算符的 ': ' 必须整体加引号，否则 YAML 解析失败、整个 bundle 不加载
-        command: !!js "process.env.DSH_AL_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')"
-        args:
-          - '-m'
-          - 'dsh_autonomous_learning.plugin'
-        cwd: !!js process.env.DSH_AL_WORKDIR || process.cwd()
-        env:
-          DSH_AL_WORKDIR: !!js process.env.DSH_AL_WORKDIR || process.cwd()
-          DSH_AL_HOME: !!js process.env.DSH_AL_HOME || ((process.env.DSH_AL_WORKDIR || process.cwd()) + '/dsh_autonomous_learning')
-          PYTHONPATH: !!js process.env.PYTHONPATH || (process.env.DSH_AL_WORKDIR || process.cwd())
-          PYTHONUTF8: '1'
-          PYTHONIOENCODING: 'utf-8'
-          DSH_AL_HOST_APPROVAL: '1'
-        failOnStartupError: true
+# 自主学习插件（原生 TS 引擎）
+#
+# 工具不再通过 MCP 子进程注册：plugins/autolearn/index.js 直接调用
+# dist/adapters/dsh/plugin.js，把 11 个原生工具挂到 ctx.tools。
+# 因此本 bundle 不需要向 profile 树插入任何 entry（保持空 patch）。
+#
+# 可选的跨 Agent 兼容层见 docs/refactor/mcp-adapter.md：
+#   node dist/adapters/mcp/server.js   （stdio MCP，调用同一个引擎）
+[]
