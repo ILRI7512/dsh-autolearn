@@ -204,10 +204,25 @@ class SecurityConfig:
     # 开启后本插件不再要求 confirm_token，而是依赖宿主在工具执行前的审批；
     # 独立运行（CLI/其它 MCP 客户端）时保持 false，改用 `confirmations` 子命令人工批准。
     delegate_approval_to_host: bool = False
+    # SSRF 防护：默认只允许抓公网地址。内网/离线场景需显式放开。
+    allow_private_networks: bool = False
+    max_redirects: int = 5
+    # 抓取只接受这些 content-type 前缀（其余直接拒绝，避免把二进制当文本入库）
+    allowed_content_types: List[str] = field(
+        default_factory=lambda: [
+            "text/",
+            "application/json",
+            "application/xml",
+            "application/xhtml+xml",
+            "application/pdf",
+        ]
+    )
 
     def validate(self) -> None:
         if self.exec_timeout_s <= 0:
             raise ConfigError("security.exec_timeout_s 必须为正数")
+        if self.max_redirects < 0 or self.max_redirects > 20:
+            raise ConfigError("security.max_redirects 必须在 0..20 之间")
 
 
 @dataclass

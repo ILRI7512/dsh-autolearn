@@ -66,6 +66,17 @@ class PermissionDecision:
         }
 
 
+def _looks_like_path(target: str) -> bool:
+    """区分"文件路径"与"分区名/chunk_id"这类普通字符串目标。"""
+
+    value = (target or "").strip()
+    if not value or value.startswith(("http://", "https://")):
+        return False
+    if value.startswith(("/", "~", "./", "../")):
+        return True
+    return os.sep in value and not value.startswith("action:")
+
+
 def contains_secret(text: str) -> Optional[str]:
     """返回命中的秘密模式描述，未命中返回 None。"""
 
@@ -338,6 +349,14 @@ class PermissionManager:
             return PermissionDecision(True, "读取操作允许", risk=risk)
 
         if risk == RiskLevel.WRITE.value:
+            # 写入也要有路径边界：导出/备份/恢复的 path 直接来自调用方，
+            # 不校验就等于"任意文件覆盖"（审计 H-04 / SEC-03）。
+            if _looks_like_path(target) and not self.path_allowed(target):
+                return PermissionDecision(
+                    False,
+                    f"写入路径不在允许范围内（仅允许 data 目录与授权根目录）: {target}",
+                    risk=risk,
+                )
             if self.delegate_to_host:
                 return PermissionDecision(True, "写入允许（高风险动作由 DSH 宿主审批把关）", risk=risk)
             if mode == AutonomyMode.ASSISTED.value:

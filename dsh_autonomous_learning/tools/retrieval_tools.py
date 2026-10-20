@@ -648,6 +648,14 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
 
     def export_knowledge(args: Dict[str, Any]) -> Dict[str, Any]:
         path = args.get("path") or str(Path(rt.config.paths.data_dir) / "exports" / "knowledge.jsonl")
+        _require(
+            rt,
+            args,
+            action="export_knowledge",
+            risk="write",
+            target=str(path),
+            project_id=str(args.get("project_id") or ""),
+        )
         filters = ChunkFilter(project_id=args.get("project_id") or None)
         return rt.store.export(path, fmt=args.get("format", "jsonl"), filters=filters)
 
@@ -672,6 +680,14 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
 
     def backup(args: Dict[str, Any]) -> Dict[str, Any]:
         dest = args.get("dest_dir") or str(Path(rt.config.paths.data_dir) / "backups")
+        _require(
+            rt,
+            args,
+            action="backup_knowledge_base",
+            risk="write",
+            target=str(dest),
+            project_id=str(args.get("project_id") or ""),
+        )
         return rt.store.backup(dest, note=str(args.get("note") or ""))
 
     reg.register(

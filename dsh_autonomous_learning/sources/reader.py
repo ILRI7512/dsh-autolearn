@@ -13,7 +13,10 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
+import socket
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +27,58 @@ from ..core.models import utcnow_iso
 from ..security.permissions import PermissionManager
 from . import metadata as meta
 from . import parser as parsing
+
+class UnsafeTargetError(RuntimeError):
+    """目标地址不允许抓取（内网/回环/保留地址/非法 scheme）。"""
+
+
+def _resolved_addresses(host: str, port: int) -> List[str]:
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:  # pragma: no cover - 依赖网络环境
+        raise UnsafeTargetError(f"无法解析目标主机 {host}: {exc}") from exc
+    return sorted({str(info[4][0]) for info in infos})
+
+
+def _address_is_public(ip: str) -> bool:
+    addr = ipaddress.ip_address(ip)
+    if getattr(addr, "ipv4_mapped", None):
+        addr = addr.ipv4_mapped  # type: ignore[assignment]
+    return bool(addr.is_global) and not (
+        addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast
+    )
+
+
+def assert_public_target(url: str, *, allow_private: bool = False) -> str:
+    """校验抓取目标：scheme 白名单 + 解析后逐 IP 判定公网可达。
+
+    只做字符串校验是不够的 —— ``http://127.0.0.1``、``http://0x7f000001``、
+    解析到内网 IP 的域名都必须在这一层被拦住（审计 H-03 / SEC-02）。
+    """
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise UnsafeTargetError(f"只允许 http/https，收到 {parsed.scheme or '空'} scheme")
+    host = parsed.hostname or ""
+    if not host:
+        raise UnsafeTargetError("目标地址缺少主机名")
+    if allow_private:
+        return host
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    addresses = [str(literal)] if literal is not None else _resolved_addresses(host, port)
+    blocked = [ip for ip in addresses if not _address_is_public(ip)]
+    if blocked:
+        raise UnsafeTargetError(
+            f"拒绝抓取内网/私有/保留地址：{host} → {', '.join(blocked)}"
+        )
+    if port not in {80, 443, 8080, 8443}:
+        raise UnsafeTargetError(f"端口 {port} 不在允许范围（80/443/8080/8443）")
+    return host
+
 
 TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml"}
 CODE_EXTENSIONS = meta.CODE_EXTENSIONS
@@ -257,33 +312,62 @@ class SourceReader:
             "User-Agent": "DSH-Autonomous-Learning/1.0 (+local research agent)",
             "Accept": "text/html,application/xhtml+xml,text/plain,application/pdf;q=0.8,*/*;q=0.5",
         }
+        allow_private = bool(self.security.allow_private_networks)
+        max_redirects = int(self.security.max_redirects)
+        current = url
+        body = bytearray()
+        content_type = ""
+        final_url = url
         try:
-            with httpx.Client(timeout=30, follow_redirects=True, headers=headers) as client:
-                with client.stream("GET", url) as resp:
-                    if resp.status_code >= 400:
-                        return ReadResult(
-                            ok=False, location=url, error=f"HTTP {resp.status_code}: 抓取失败"
-                        )
-                    content_type = (resp.headers.get("content-type") or "").lower()
-                    body = bytearray()
-                    for chunk in resp.iter_bytes():
-                        body.extend(chunk)
-                        if len(body) > self.security.max_download_bytes:
+            with httpx.Client(timeout=30, follow_redirects=False, headers=headers) as client:
+                for _hop in range(max_redirects + 1):
+                    # 每一跳都重新校验：302 到内网地址同样必须被拦住
+                    assert_public_target(current, allow_private=allow_private)
+                    with client.stream("GET", current) as resp:
+                        if resp.is_redirect and max_redirects > 0:
+                            location = resp.headers.get("location") or ""
+                            if not location:
+                                return ReadResult(ok=False, location=current, error="重定向缺少 Location")
+                            current = str(resp.url.join(location))
+                            continue
+                        if resp.status_code >= 400:
+                            return ReadResult(
+                                ok=False, location=current, error=f"HTTP {resp.status_code}: 抓取失败"
+                            )
+                        content_type = (resp.headers.get("content-type") or "").lower()
+                        if not self._content_type_allowed(content_type):
                             return ReadResult(
                                 ok=False,
-                                location=url,
-                                error=f"响应体超过上限 {self.security.max_download_bytes} 字节，已中止",
+                                location=current,
+                                error=f"拒绝抓取非文本类型: {content_type or 'unknown'}",
                             )
-                    final_url = str(resp.url)
+                        body = bytearray()
+                        for chunk in resp.iter_bytes():
+                            body.extend(chunk)
+                            if len(body) > self.security.max_download_bytes:
+                                return ReadResult(
+                                    ok=False,
+                                    location=current,
+                                    error=f"响应体超过上限 {self.security.max_download_bytes} 字节，已中止",
+                                )
+                        final_url = str(resp.url)
+                        break
+                else:
+                    return ReadResult(ok=False, location=current, error=f"重定向超过 {max_redirects} 次，已中止")
+        except UnsafeTargetError as exc:
+            return ReadResult(ok=False, location=url, error=str(exc))
         except Exception as exc:  # noqa: BLE001
             return ReadResult(ok=False, location=url, error=f"网络请求失败: {exc}")
 
         raw = bytes(body)
         if "pdf" in content_type:
-            tmp = Path(self.permissions.data_dir or ".") / "documents" / "_tmp_fetch.pdf"
-            tmp.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_bytes(raw)
+            tmp_dir = Path(self.permissions.data_dir or ".") / "documents"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            handle = tempfile.NamedTemporaryFile(dir=tmp_dir, suffix=".pdf", delete=False)
+            tmp = Path(handle.name)
             try:
+                handle.write(raw)
+                handle.close()
                 text = self._read_pdf(tmp)
                 title = url.rsplit("/", 1)[-1] or "PDF 文档"
                 return self._finish_http(url, final_url, title, text, "pdf", len(raw))
@@ -294,6 +378,17 @@ class SourceReader:
             title, text = parsing.html_to_text(text_raw)
             return self._finish_http(url, final_url, title, text, "html", len(raw))
         return self._finish_http(url, final_url, url.rsplit("/", 1)[-1], text_raw, "text", len(raw))
+
+    def _content_type_allowed(self, content_type: str) -> bool:
+        """只接受文本类与 PDF；二进制一律拒绝（审计 H-14）。"""
+
+        allowed = self.security.allowed_content_types or []
+        if not allowed:
+            return True
+        normalized = content_type.split(";")[0].strip().lower()
+        if not normalized:
+            return True  # 有些站点不返回 content-type，由后续解码兜底
+        return any(normalized.startswith(prefix.lower()) for prefix in allowed)
 
     def _finish_http(self, url: str, final_url: str, title: str, text: str, doc_type: str, size: int) -> ReadResult:
         text = (text or "").strip()
