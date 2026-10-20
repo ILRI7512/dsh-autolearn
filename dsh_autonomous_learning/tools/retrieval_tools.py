@@ -373,8 +373,9 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
     )
 
     def search_knowledge(args: Dict[str, Any]) -> Dict[str, Any]:
+        project_id = args.get("project_id") or None
         filters = ChunkFilter(
-            project_id=args.get("project_id") or None,
+            project_id=project_id,
             partitions=args.get("partitions"),
             domains=args.get("domains"),
             topics=args.get("topics"),
@@ -385,7 +386,11 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
             min_confidence=args.get("min_confidence"),
             updated_after=args.get("updated_after"),
         )
-        if args.get("include_global") and args.get("project_id"):
+        if not project_id and not bool(args.get("include_all_projects")):
+            # 没给项目就必须显式跨项目检索：默认只返回 visibility=global 的知识，
+            # 否则任何一次检索都会把其他项目的私有知识带走（审计 H-06）。
+            filters.visibility = "global"
+        elif args.get("include_global") and project_id:
             filters.visibility = None  # 由 store 的 project/global 规则处理
         return rt.store.search(
             args["query"],
@@ -415,6 +420,7 @@ def register(reg: ToolRegistry, rt: Runtime, orch: LearningOrchestrator) -> None
                     "updated_after": {"type": "string"},
                     "include_content": {"type": "boolean"},
                     "include_global": {"type": "boolean"},
+                    "include_all_projects": {"type": "boolean"},
                     "mode": {"type": "string", "enum": ["hybrid", "vector", "keyword"]},
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 100},
                 },

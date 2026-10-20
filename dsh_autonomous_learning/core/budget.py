@@ -63,8 +63,32 @@ class BudgetTracker:
         self.state = BudgetState(run_id=run_id, project_id=project_id)
         self.daily_spent = float(daily_spent)
         self.iteration = 0
+        self._model: Any = None
 
     # ------------------------------------------------------------------ #
+    def attach(self, model: Any) -> None:
+        """把本核算器挂到模型上：每次真实调用都记账（调用数 + 成本 + 落库）。
+
+        历史问题：``consume_llm`` 全仓没有任何调用者，``llm_calls`` 表也没有写入口，
+        于是单轮调用上限、每日预算、单轮费用上限永远不会触发，``snapshot()``
+        永远显示 0 次调用。
+        """
+
+        if model is None:
+            return
+        hooks = getattr(model, "hooks", None)
+        if hooks is None:
+            return
+        if self.consume_llm not in hooks:
+            hooks.append(self.consume_llm)
+        self._model = model
+
+    def detach(self) -> None:
+        hooks = getattr(self._model, "hooks", None)
+        if isinstance(hooks, list) and self.consume_llm in hooks:
+            hooks.remove(self.consume_llm)
+        self._model = None
+
     def set_iteration(self, iteration: int) -> None:
         self.iteration = iteration
 
@@ -106,6 +130,19 @@ class BudgetTracker:
         cost = float(getattr(response, "cost_estimate", 0.0) or 0.0)
         self.state.cost_estimate += cost
         self.daily_spent += cost
+        if self.metadata is not None:
+            try:
+                self.metadata.log_llm_call(
+                    stage=str(getattr(response, "stage", "") or ""),
+                    model=str(getattr(response, "model", "") or ""),
+                    prompt_tokens=int(getattr(response, "prompt_tokens", 0) or 0),
+                    completion_tokens=int(getattr(response, "completion_tokens", 0) or 0),
+                    cost=cost,
+                    ok=True,
+                    project_id=self.state.project_id,
+                )
+            except Exception:  # noqa: BLE001 - 记账失败不应影响学习本身
+                pass
         if self.cfg.daily_budget_usd > 0 and self.daily_spent > self.cfg.daily_budget_usd:
             raise BudgetExceeded(
                 f"超出每日预算 {self.cfg.daily_budget_usd:.2f} USD（估算）", "daily_budget"

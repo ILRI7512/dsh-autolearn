@@ -308,9 +308,6 @@ class LearningOrchestrator:
         # 设置卡可能在两轮之间被改过：模式/预算/任务上限在这里刷新
         settings = self.rt.apply_settings()
 
-        if not self.metadata.list_tasks(project_id):
-            self.plan(project_id, use_model=use_model)
-
         self.recover(project_id)
         iteration = self.metadata.next_iteration(project_id)
         run = Run(
@@ -330,6 +327,12 @@ class LearningOrchestrator:
             daily_spent=self._today_spend(),
         )
         tracker.set_iteration(iteration)
+        # 真实调用记账：模型每次 complete() 都会回到 consume_llm
+        tracker.attach(self.rt.model)
+
+        # 首次规划也要计入预算：放到 tracker 挂载之后再调用模型
+        if not self.metadata.list_tasks(project_id):
+            self.plan(project_id, use_model=use_model)
 
         executed: List[Dict[str, Any]] = []
         new_knowledge = 0
@@ -399,6 +402,7 @@ class LearningOrchestrator:
                         "max_tasks_per_run" if limit >= self.cfg.max_tasks_per_run else "task_limit_reached"
                     )
         finally:
+            tracker.detach()
             evaluation = self._safe_evaluate(project_id)
             summary = {
                 "run_id": run.run_id,
