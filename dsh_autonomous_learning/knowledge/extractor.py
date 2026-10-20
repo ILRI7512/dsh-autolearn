@@ -247,6 +247,17 @@ class KnowledgeExtractor:
         for draft in drafts:
             unique.setdefault(draft.content_hash, draft)
         stats.kept = len(unique)
+        if not unique:
+            # 零产出必须显式告警：短文档被 min_chunk_chars 全跳过时，
+            # 历史实现静默返回 0 条，文档仍被打成 extracted（审计 H-02）。
+            if stats.skipped_short:
+                stats.warnings.append(
+                    f"正文被切成 {stats.skipped_short} 段，全部短于 "
+                    f"min_chunk_chars={self.cfg.min_chunk_chars}，未提取到知识；"
+                    "可调小该阈值或补充正文"
+                )
+            else:
+                stats.warnings.append("文档未提取到任何知识单元（内容可能过短或缺少可识别结构）")
         return {
             "drafts": [d.to_row() for d in unique.values()],
             "stats": stats.to_dict(),

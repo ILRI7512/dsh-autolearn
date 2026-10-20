@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -337,7 +338,9 @@ class LearningOrchestrator:
         executed: List[Dict[str, Any]] = []
         new_knowledge = 0
         stop_reason = ""
-        limit = max_tasks or self.cfg.max_tasks_per_run
+        # 调用方给的 max_tasks 不能突破配置上限（审计 T-03）
+        limit = min(int(max_tasks or self.cfg.max_tasks_per_run), int(self.cfg.max_tasks_per_run))
+        limit = max(1, limit)
         error: str = ""
 
         try:
@@ -519,6 +522,8 @@ class LearningOrchestrator:
                 "finished_at": utcnow_iso() if status == TaskStatus.FAILED.value else "",
             },
         )
+        if status == TaskStatus.FAILED.value:
+            self._block_dependents(task["task_id"], task["project_id"], str(exc)[:300])
         self.rt.permissions.audit.log(
             action="task_failed",
             target=task["task_id"],
@@ -527,6 +532,45 @@ class LearningOrchestrator:
             project_id=task["project_id"],
             detail={"kind": task["kind"], "error": str(exc)[:300], "status": status},
         )
+
+    def _block_dependents(self, task_id: str, project_id: str, reason: str) -> int:
+        """依赖任务永久失败时，把下游标 blocked，避免项目静默停滞。"""
+
+        blocked = 0
+        for row in self.metadata.list_tasks(project_id, status=["pending", "retrying"]):
+            deps = list(row.get("depends_on") or [])
+            if task_id not in deps:
+                continue
+            self.metadata.update_task(
+                row["task_id"],
+                {
+                    "status": TaskStatus.BLOCKED.value,
+                    "error": f"依赖任务 {task_id} 永久失败，已阻塞：{reason}",
+                },
+            )
+            blocked += 1
+        return blocked
+
+    @staticmethod
+    def _task_timed_out(task: Mapping[str, Any], started: float) -> bool:
+        timeout_s = int(task.get("timeout_s") or 0)
+        return timeout_s > 0 and (time.monotonic() - started) > timeout_s
+
+    @staticmethod
+    def _parse_stages(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _document_topic(source: Mapping[str, Any]) -> str:
+        return str((source.get("metadata") or {}).get("topic") or "")
 
     # ------------------------------------------------------------------ #
     # 具体任务
@@ -635,6 +679,16 @@ class LearningOrchestrator:
             char_count=len(read.text),
             parser=read.doc_type,
             parse_status="parsed",
+            stages={
+                "registered": True,
+                "fetched": True,
+                "parsed": True,
+                "extracted": False,
+                "classified": False,
+                "indexed": False,
+                "retrieval_verified": False,
+                "task_verified": False,
+            },
         )
         self.metadata.insert("documents", document.to_row())
         return {
@@ -651,13 +705,27 @@ class LearningOrchestrator:
         if not project:
             raise ValueError("项目不存在")
         topic = str((task.get("inputs") or {}).get("topic") or "")
-        docs = self.metadata.query_dicts(
+        candidates = self.metadata.query_dicts(
             "SELECT * FROM documents WHERE project_id=? AND parse_status='parsed' ORDER BY created_at LIMIT ?",
-            (project["project_id"], self.cfg.max_sources_per_task),
+            (project["project_id"], self.cfg.max_sources_per_task * 4),
         )
+        # 按主题取文档：历史实现不区分主题，第一个 EXTRACT 会吃光项目里所有
+        # parsed 文档，其余主题空转却记 completed（审计 H-01）。
+        if topic:
+            tagged, untagged = [], []
+            for doc in candidates:
+                source = self.metadata.get("sources", doc.get("source_id") or "") or {}
+                if self._document_topic(source) == topic:
+                    tagged.append(doc)
+                elif not self._document_topic(source):
+                    untagged.append(doc)
+            candidates = tagged or untagged
+        docs = candidates[: self.cfg.max_sources_per_task]
         added = 0
         processed = 0
         warnings: List[str] = []
+        timeout_s = int(task.get("timeout_s") or self.cfg.max_task_seconds)
+        started = time.monotonic()
         for doc in docs:
             try:
                 text = Path(doc["content_path"]).read_text(encoding="utf-8")
@@ -679,26 +747,56 @@ class LearningOrchestrator:
                 "title": doc.get("title") or source.get("title", ""),
                 "language": doc.get("language", "unknown"),
             }
+            if self._task_timed_out(task, started):
+                warnings.append(f"任务超过 timeout_s={timeout_s}s，已处理 {processed}/{len(docs)} 个文档后中止")
+                break
             extraction = self.rt.extractor.extract(
                 project=project, document=payload, topic=topic, use_model=use_model
             )
             drafts = extraction["drafts"]
+            doc_warnings = list(extraction.get("warnings", []))
+            warnings.extend(doc_warnings)
+            stages = self._parse_stages(doc.get("stages"))
+            stages.setdefault("registered", True)
+            stages.setdefault("fetched", True)
+            stages.setdefault("parsed", True)
             if drafts:
                 result = self.store.add_chunks(drafts)
                 added += int(result.get("added", 0)) + int(result.get("updated", 0))
-            warnings.extend(extraction.get("warnings", []))
-            self.metadata.update("documents", doc["document_id"], {"parse_status": "extracted"})
+                stages.update({"extracted": True, "classified": True, "indexed": True})
+                self.metadata.update(
+                    "documents",
+                    doc["document_id"],
+                    {"parse_status": "extracted", "stages": stages, "error": ""},
+                )
+            else:
+                # 零产出不是"成功"：明确记录 no_knowledge 与原因，便于追查
+                stages.update({"extracted": False, "zero_yield": True})
+                self.metadata.update(
+                    "documents",
+                    doc["document_id"],
+                    {
+                        "parse_status": "no_knowledge",
+                        "stages": stages,
+                        "error": "；".join(doc_warnings)[:500] or "未提取到知识",
+                    },
+                )
             processed += 1
 
         if added:
             self.metadata.record_metric("knowledge", "added", added, project["project_id"])
-        return {
+        payload: Dict[str, Any] = {
             "new_knowledge": added,
-            "progress": processed > 0,
+            "progress": processed > 0 and added > 0,
             "documents_processed": processed,
             "chunks_added": added,
             "warnings": warnings[:20],
         }
+        if processed and added == 0:
+            payload["reason"] = "；".join(warnings)[:300] or "所有文档均未提取到知识"
+        elif not processed:
+            payload["reason"] = f"没有属于主题「{topic}」的待提取文档" if topic else "没有待提取文档"
+        return payload
 
     def _task_verify(self, task: Mapping[str, Any]) -> Dict[str, Any]:
         project_id = task["project_id"]
@@ -713,7 +811,12 @@ class LearningOrchestrator:
         attempted = 0
         failures: List[Dict[str, Any]] = []
         warnings: List[str] = []
+        timeout_s = int(task.get("timeout_s") or self.cfg.max_task_seconds)
+        started = time.monotonic()
         for chunk in chunks:
+            if self._task_timed_out(task, started):
+                warnings.append(f"任务超过 timeout_s={timeout_s}s，已核验 {attempted}/{len(chunks)} 条后中止")
+                break
             attempted += 1
             try:
                 outcome = self.rt.verifier.verify(chunk["chunk_id"])

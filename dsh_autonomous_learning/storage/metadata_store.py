@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 from ..core.models import new_id
 from .tokenizer import BM25Params, expand_query
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: 逐版本迁移步骤（在新库上由 SCHEMA_SQL 直接建好，旧库按版本号补齐）。
 #: 每条语句都必须是幂等的：迁移可能在部分失败后重跑。
@@ -40,6 +40,10 @@ MIGRATIONS: Dict[int, Tuple[str, ...]] = {
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_chunks_live_content "
         "ON chunks(project_id, content_hash) "
         "WHERE invalidated_at = '' AND content_hash <> ''",
+    ),
+    4: (
+        # 真实阶段进度：registered/fetched/parsed/extracted/classified/indexed
+        "ALTER TABLE documents ADD COLUMN stages TEXT NOT NULL DEFAULT '{}'",
     ),
 }
 
@@ -151,6 +155,7 @@ CREATE TABLE IF NOT EXISTS documents (
     parser       TEXT NOT NULL DEFAULT '',
     parse_status TEXT NOT NULL DEFAULT 'parsed',
     error        TEXT NOT NULL DEFAULT '',
+    stages       TEXT NOT NULL DEFAULT '{}',
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);
@@ -408,7 +413,7 @@ JSON_COLUMNS: Dict[str, Tuple[str, ...]] = {
     "tasks": ("inputs", "steps", "depends_on", "acceptance", "result"),
     "runs": ("summary",),
     "sources": ("metadata",),
-    "documents": (),
+    "documents": ("stages",),
     "chunks": ("verification_evidence", "metadata"),
     "verification_records": ("evidence",),
     "conflicts": ("evidence",),
@@ -457,7 +462,7 @@ COLUMNS: Dict[str, Tuple[str, ...]] = {
     "documents": (
         "document_id", "project_id", "source_id", "title", "doc_type", "language",
         "content_path", "content_hash", "char_count", "parser", "parse_status", "error",
-        "created_at",
+        "stages", "created_at",
     ),
     "chunks": (
         "chunk_id", "project_id", "document_id", "partition", "domain", "topic", "subtopic",
@@ -708,7 +713,8 @@ class MetadataStore:
                     try:
                         conn.execute(statement)
                     except sqlite3.OperationalError as exc:  # 幂等重跑
-                        if "already exists" not in str(exc).lower():
+                        message = str(exc).lower()
+                        if "already exists" not in message and "duplicate column" not in message:
                             raise
             if found < SCHEMA_VERSION:
                 conn.execute(

@@ -143,6 +143,8 @@ def test_migration_v3_dedupes_and_preserves_history(tmp_path):
         assert archived[0]["status"] == "superseded"
         # 迁移可重复执行
         reopened.migrate()
-        assert reopened.scalar("SELECT value FROM meta WHERE key='schema_version'") == "3"
+        from dsh_autonomous_learning.storage.metadata_store import SCHEMA_VERSION
+
+        assert reopened.scalar("SELECT value FROM meta WHERE key='schema_version'") == str(SCHEMA_VERSION)
     finally:
         reopened.close()

@@ -142,7 +142,8 @@ class TaskKind(StrEnum):
     PLAN = "plan"
     GAP_ANALYSIS = "gap_analysis"
     DISCOVER = "discover"
-    READ = "read"
+    # 注意：历史上这里还有个 READ，但编排器从未实现对应分支，
+    # 一旦计划器产生该类型就会抛"未知任务类型"。已移除（审计 T-01）。
     EXTRACT = "extract"
     VERIFY = "verify"
     PRACTICE = "practice"
@@ -372,6 +373,9 @@ class Document:
     parser: str = ""
     parse_status: str = "parsed"
     error: str = ""
+    # 真实阶段进度：registered / fetched / parsed / extracted / classified /
+    # indexed / retrieval_verified / task_verified（每步由实际执行结果置位）
+    stages: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utcnow_iso)
 
     def to_row(self) -> Dict[str, Any]:
