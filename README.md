@@ -107,4 +107,8 @@ python -m pytest dsh_autonomous_learning/tests   # 引擎侧（PYTHONPATH=仓库
 
 ## 许可
 
-未附许可证文件。若要公开发布，请先选择许可证（例如 MIT / Apache-2.0）后再公开仓库。
+本项目以 **MIT** 许可证发布，全文见 [LICENSE](LICENSE)。
+
+MIT 只覆盖本仓库自己的代码与文档。学习过程中引用的第三方资料（官方文档、规范原文、
+产品页面截图等）仍归原作者所有，许可证见各资源的 `license_notes` 字段；
+知识库中只保存归纳后的结论与来源链接，不复制原文全文或素材本体。

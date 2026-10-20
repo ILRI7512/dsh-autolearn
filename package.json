@@ -13,5 +13,6 @@
     "test": "pnpm run syntax && pnpm run check",
     "py:install": "python -m pip install -r dsh_autonomous_learning/requirements.txt",
     "py:test": "python -m pytest dsh_autonomous_learning/tests"
-  }
+  },
+  "license": "MIT"
 }
