@@ -254,11 +254,32 @@ export function apply(ctx, config = {}) {
   } catch (error) {
     console.warn(`[dsh-autolearn] settings bootstrap failed: ${error}`)
   }
-  const webServer = ctx?.webServer ?? ctx?.get?.('webServer')
-  if (!webServer || typeof webServer.register !== 'function') {
-    console.warn('[dsh-autolearn] webServer unavailable; settings card API disabled')
-    return
+  // Cordis 对未 inject 的服务做属性取值会抛 `cannot get property "webServer" without inject`：
+  // 直接写 ctx.webServer 会让整个 entry 激活失败（web boot 报 "did not activate"）。
+  // 但把 webServer 写进顶层 inject 也不行——headless/CLI profile 没有它，entry 会永久挂起，
+  // 11 个原生工具跟着失效。正确做法是把「挂设置卡路由」放进子注入上下文，
+  // 由 Cordis 等服务就绪后再执行（与 dsh-mcp-connector 的 injectWebRoutes 同一策略）。
+  const mountSettingsRoute = (wctx) => {
+    let webServer
+    try {
+      webServer = wctx?.webServer ?? wctx?.get?.('webServer')
+    } catch {
+      webServer = undefined
+    }
+    if (!webServer || typeof webServer.register !== 'function') {
+      console.warn('[dsh-autolearn] webServer unavailable; settings card API disabled')
+      return
+    }
+    wctx.effect(() => webServer.register(settingsRoute(env)), 'dsh-autolearn: settings route')
+    console.log(`[dsh-autolearn] settings API ready: ${target}`)
   }
-  ctx.effect(() => webServer.register(settingsRoute(env)), 'dsh-autolearn: settings route')
-  console.log(`[dsh-autolearn] settings API ready: ${target}`)
+  if (typeof ctx?.inject === 'function') {
+    try {
+      ctx.inject(['webServer'], (wctx) => mountSettingsRoute(wctx))
+    } catch (error) {
+      console.warn(`[dsh-autolearn] webServer inject failed; settings card API disabled: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  } else {
+    mountSettingsRoute(ctx)
+  }
 }
