@@ -24,6 +24,28 @@ class VersionManager:
         self.metadata = metadata
 
     # ------------------------------------------------------------------ #
+    #: 只允许状态机 / 核验流程写入的字段。手工更新（含 MCP 工具）不得触碰，
+    #: 否则一次 update_knowledge(fields={"status":"verified"}) 就能绕过全部证据门槛。
+    PROTECTED_FIELDS = frozenset(
+        {
+            "chunk_id",
+            "project_id",
+            "created_at",
+            "version",
+            "status",
+            "level",
+            "verification_status",
+            "verification_method",
+            "verification_evidence",
+            "evidence_count",
+            "evidence_independence",
+            "confidence",
+            "confidence_basis",
+            "invalidated_at",
+            "superseded_by",
+        }
+    )
+
     def update(
         self,
         chunk_id: str,
@@ -32,6 +54,13 @@ class VersionManager:
         fields: Optional[Dict[str, Any]] = None,
         reason: str = "manual_update",
     ) -> Dict[str, Any]:
+        blocked = sorted(set((fields or {})) & self.PROTECTED_FIELDS)
+        if blocked:
+            raise ValueError(
+                "这些字段只能由状态机/核验流程修改，不能手工写入："
+                + ", ".join(blocked)
+                + "。请改用 verify_knowledge / run_learning_experiment 等流程。"
+            )
         payload: Dict[str, Any] = dict(fields or {})
         if content is not None:
             payload["content"] = content
