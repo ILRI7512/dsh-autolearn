@@ -41,7 +41,7 @@ from ..practice.test_runner import CodeTestRunner
 from ..security.execution_policy import ExecutionPolicy
 from ..security.permissions import PermissionManager
 from ..sources.discovery import SourceDiscovery
-from ..sources.metadata import describe_source
+from ..sources.metadata import describe_source, normalize_location
 from ..sources.reader import SourceReader
 from ..storage.metadata_store import ChunkFilter, MetadataStore, StorageError
 from ..storage.vector_store import KnowledgeStore, KnowledgeStoreError
@@ -557,6 +557,18 @@ class LearningOrchestrator:
         return timeout_s > 0 and (time.monotonic() - started) > timeout_s
 
     @staticmethod
+    def _parse_json_obj(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
     def _parse_stages(raw: Any) -> Dict[str, Any]:
         if isinstance(raw, Mapping):
             return dict(raw)
@@ -592,7 +604,19 @@ class LearningOrchestrator:
         saved: List[Dict[str, Any]] = []
         failures: List[Dict[str, Any]] = []
         for candidate in found["candidates"][: self.cfg.max_sources_per_task]:
-            read = self.rt.reader.read(candidate["location"], project_id=project["project_id"])
+            normalized = normalize_location(candidate["location"])
+            prev_rows = self.metadata.query_dicts(
+                "SELECT * FROM sources WHERE project_id=? AND location=? ORDER BY created_at DESC LIMIT 1",
+                (project["project_id"], normalized),
+            )
+            prev_meta = (prev_rows[0].get("metadata") or {}) if prev_rows else None
+            read = self.rt.reader.read(
+                candidate["location"], project_id=project["project_id"], prev_meta=prev_meta
+            )
+            if getattr(read, "not_modified", False):
+                # 条件请求命中 304：内容没变，不重新解析、不入库、不重复 embedding
+                warnings.append(f"内容未修改，已跳过: {candidate['location']}")
+                continue
             if not read.ok:
                 failures.append({"location": candidate["location"], "error": read.error})
                 source = Source(
@@ -645,24 +669,75 @@ class LearningOrchestrator:
         if not getattr(read, "ok", False):
             raise StorageError(getattr(read, "error", "读取失败"))
         info = read.metadata or {}
-        source = Source(
-            source_id=new_id("src"),
-            project_id=project_id,
-            source_type=read.source_type,
-            location=read.location,
-            title=read.title,
-            publisher=info.get("publisher", ""),
-            published_at=info.get("published_at", ""),
-            accessed_at=utcnow_iso(),
-            license_status=info.get("license_status", "unknown"),
-            quality=float(info.get("quality", 0.5) or 0.5),
-            quality_basis=info.get("quality_basis", ""),
-            freshness_status=info.get("freshness_status", "unknown"),
-            content_hash=read.content_hash,
-            fetch_ok=True,
-            metadata={"bytes": read.bytes_read, "doc_type": read.doc_type, "topic": topic},
+        # 来源稳定标识：同一 location 只保留一行，重复抓取是"更新"而不是"新增"
+        location = normalize_location(read.location or "")
+        existing_source = self.metadata.query_dicts(
+            "SELECT * FROM sources WHERE project_id=? AND location=? ORDER BY created_at DESC LIMIT 1",
+            (project_id, location),
         )
-        self.metadata.insert("sources", source.to_row())
+        if existing_source:
+            source_row = existing_source[0]
+            prev_meta = self._parse_json_obj(source_row.get("metadata"))
+            changed = (source_row.get("content_hash") or "") != (read.content_hash or "")
+            self.metadata.update(
+                "sources",
+                source_row["source_id"],
+                {
+                    "title": read.title or source_row.get("title", ""),
+                    "content_hash": read.content_hash,
+                    "accessed_at": utcnow_iso(),
+                    "fetch_ok": True,
+                    "error": "",
+                    "metadata": {
+                        **prev_meta,
+                        **(info or {}),
+                        "bytes": read.bytes_read,
+                        "doc_type": read.doc_type,
+                        "topic": topic or prev_meta.get("topic", ""),
+                    },
+                },
+            )
+            superseded = 0
+            if changed:
+                superseded = self._supersede_documents(
+                    project_id, source_row["source_id"], reason="来源内容发生变化"
+                )
+            else:
+                # 内容完全没变：不新增文档、不重新解析、不重复 embedding
+                return {
+                    "source_id": source_row["source_id"],
+                    "document_id": "",
+                    "location": location,
+                    "chars": len(read.text),
+                    "source_type": read.source_type,
+                    "quality": float(source_row.get("quality", 0.5) or 0.5),
+                    "unchanged": True,
+                    "superseded_documents": 0,
+                }
+            source_id_value = source_row["source_id"]
+            quality_value = float(source_row.get("quality", 0.5) or 0.5)
+        else:
+            source = Source(
+                source_id=new_id("src"),
+                project_id=project_id,
+                source_type=read.source_type,
+                location=location,
+                title=read.title,
+                publisher=info.get("publisher", ""),
+                published_at=info.get("published_at", ""),
+                accessed_at=utcnow_iso(),
+                license_status=info.get("license_status", "unknown"),
+                quality=float(info.get("quality", 0.5) or 0.5),
+                quality_basis=info.get("quality_basis", ""),
+                freshness_status=info.get("freshness_status", "unknown"),
+                content_hash=read.content_hash,
+                fetch_ok=True,
+                metadata={"bytes": read.bytes_read, "doc_type": read.doc_type, "topic": topic},
+            )
+            self.metadata.insert("sources", source.to_row())
+            source_id_value = source.source_id
+            quality_value = source.quality
+            superseded = 0
 
         document_id = new_id("doc")
         content_path = Path(self.rt.config.paths.documents_dir) / f"{document_id}.txt"
@@ -670,7 +745,7 @@ class LearningOrchestrator:
         document = Document(
             document_id=document_id,
             project_id=project_id,
-            source_id=source.source_id,
+            source_id=source_id_value,
             title=read.title,
             doc_type=read.doc_type,
             language=info.get("language", "unknown"),
@@ -692,13 +767,57 @@ class LearningOrchestrator:
         )
         self.metadata.insert("documents", document.to_row())
         return {
-            "source_id": source.source_id,
+            "source_id": source_id_value,
             "document_id": document_id,
-            "location": read.location,
+            "location": location,
             "chars": len(read.text),
             "source_type": read.source_type,
-            "quality": source.quality,
+            "quality": quality_value,
+            "unchanged": False,
+            "superseded_documents": superseded,
         }
+
+    def _supersede_documents(self, project_id: str, source_id: str, *, reason: str) -> int:
+        """来源内容变更时，把旧文档与其片段标为 superseded（不删除，保留历史）。"""
+
+        if not source_id:
+            return 0
+        docs = self.metadata.query_dicts(
+            "SELECT * FROM documents WHERE project_id=? AND source_id=? AND parse_status<>'superseded'",
+            (project_id, source_id),
+        )
+        now = utcnow_iso()
+        count = 0
+        for doc in docs:
+            stages = self._parse_stages(doc.get("stages"))
+            stages["superseded"] = True
+            self.metadata.update(
+                "documents",
+                doc["document_id"],
+                {"parse_status": "superseded", "stages": stages, "error": reason},
+            )
+            for chunk in self.metadata.query_dicts(
+                "SELECT chunk_id, metadata FROM chunks WHERE document_id=? AND invalidated_at=''",
+                (doc["document_id"],),
+            ):
+                meta = chunk.get("metadata") or {}
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except ValueError:
+                        meta = {}
+                meta = dict(meta)
+                meta["invalidated_reason"] = reason
+                self.metadata.update_chunk(
+                    chunk["chunk_id"],
+                    {
+                        "status": KnowledgeStatus.SUPERSEDED.value,
+                        "invalidated_at": now,
+                        "metadata": meta,
+                    },
+                )
+                count += 1
+        return count
 
     def _task_extract(self, task: Mapping[str, Any], *, use_model: bool) -> Dict[str, Any]:
         project = self.metadata.get_project(task["project_id"])

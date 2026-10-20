@@ -712,11 +712,39 @@ class KnowledgeStore:
         ids = self._allowed_ids(filters)
         if len(ids) < 2:
             return []
+        found: List[Dict[str, Any]] = []
+        # 先按内容指纹精确配对：只靠向量相似度会漏掉"同内容不同标题"
+        # （实测 sim=0.909 < 0.94），也无法覆盖哈希向量更新后的场景（审计 K-07）。
+        exact_pairs = set()
+        for row in self.metadata.query(
+            "SELECT project_id, content_hash FROM chunks WHERE chunk_id IN (%s) "
+            "AND content_hash<>'' GROUP BY project_id, content_hash HAVING COUNT(*)>1"
+            % ",".join("?" * len(ids)),
+            ids,
+        ):
+            group = self.metadata.query_dicts(
+                "SELECT chunk_id FROM chunks WHERE project_id=? AND content_hash=? AND invalidated_at=''",
+                (row["project_id"], row["content_hash"]),
+            )
+            group_ids = [g["chunk_id"] for g in group]
+            for i in range(len(group_ids)):
+                for j in range(i + 1, len(group_ids)):
+                    pair = tuple(sorted((group_ids[i], group_ids[j])))
+                    if pair in exact_pairs:
+                        continue
+                    exact_pairs.add(pair)
+                    found.append(
+                        {
+                            "chunk_a": pair[0],
+                            "chunk_b": pair[1],
+                            "similarity": 1.0,
+                            "reason": "content_hash",
+                        }
+                    )
         rows = [self._pos[cid] for cid in ids if cid in self._pos]
         if len(rows) < 2:
             return []
         sub = self._matrix[rows]
-        found: List[Dict[str, Any]] = []
         for start in range(0, len(rows), 256):
             block = sub[start : start + 256]
             sims = block @ sub.T
@@ -727,10 +755,13 @@ class KnowledgeStore:
                         return found
                     sim = float(sims[local_i, j])
                     if sim >= threshold:
+                        pair = tuple(sorted((self._ids[rows[global_i]], self._ids[rows[j]])))
+                        if pair in exact_pairs:
+                            continue
                         found.append(
                             {
-                                "chunk_a": self._ids[rows[global_i]],
-                                "chunk_b": self._ids[rows[j]],
+                                "chunk_a": pair[0],
+                                "chunk_b": pair[1],
                                 "similarity": round(sim, 4),
                                 "reason": "vector_similarity",
                             }

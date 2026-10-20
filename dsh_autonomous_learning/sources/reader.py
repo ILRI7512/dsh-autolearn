@@ -19,7 +19,7 @@ import socket
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urlparse
 
 from ..config import SecurityConfig
@@ -110,6 +110,8 @@ class ReadResult:
     error: str = ""
     warnings: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: 条件请求命中 304（内容未变化，不需要重新解析/入库）
+    not_modified: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -134,11 +136,20 @@ class SourceReader:
         self.permissions = permissions
 
     # ------------------------------------------------------------------ #
-    def read(self, location: str, *, project_id: str = "", confirm_token: str = "") -> ReadResult:
+    def read(
+        self,
+        location: str,
+        *,
+        project_id: str = "",
+        confirm_token: str = "",
+        prev_meta: Optional[Mapping[str, Any]] = None,
+    ) -> ReadResult:
         if not location:
             return ReadResult(ok=False, error="location 不能为空")
         if location.startswith(("http://", "https://")):
-            return self._read_http(location, confirm_token=confirm_token, project_id=project_id)
+            return self._read_http(
+                location, confirm_token=confirm_token, project_id=project_id, prev_meta=prev_meta
+            )
         return self._read_local(location, confirm_token=confirm_token, project_id=project_id)
 
     # ------------------------------------------------------------------ #
@@ -278,7 +289,14 @@ class SourceReader:
             raise ReadError(f"DOCX 解析失败: {exc}") from exc
 
     # ------------------------------------------------------------------ #
-    def _read_http(self, url: str, *, confirm_token: str, project_id: str) -> ReadResult:
+    def _read_http(
+        self,
+        url: str,
+        *,
+        confirm_token: str,
+        project_id: str,
+        prev_meta: Optional[Mapping[str, Any]] = None,
+    ) -> ReadResult:
         if meta.is_paywalled_or_login(url):
             return ReadResult(
                 ok=False,
@@ -312,6 +330,8 @@ class SourceReader:
             "User-Agent": "DSH-Autonomous-Learning/1.0 (+local research agent)",
             "Accept": "text/html,application/xhtml+xml,text/plain,application/pdf;q=0.8,*/*;q=0.5",
         }
+        headers.update(self.conditional_headers(prev_meta))
+        validator: Dict[str, str] = {"etag": "", "last_modified": ""}
         allow_private = bool(self.security.allow_private_networks)
         max_redirects = int(self.security.max_redirects)
         current = url
@@ -330,6 +350,13 @@ class SourceReader:
                                 return ReadResult(ok=False, location=current, error="重定向缺少 Location")
                             current = str(resp.url.join(location))
                             continue
+                        if resp.status_code == 304:
+                            return ReadResult(
+                                ok=False,
+                                location=current,
+                                not_modified=True,
+                                error="内容未修改（304），跳过重新解析与入库",
+                            )
                         if resp.status_code >= 400:
                             return ReadResult(
                                 ok=False, location=current, error=f"HTTP {resp.status_code}: 抓取失败"
@@ -351,6 +378,10 @@ class SourceReader:
                                     error=f"响应体超过上限 {self.security.max_download_bytes} 字节，已中止",
                                 )
                         final_url = str(resp.url)
+                        validator = {
+                            "etag": resp.headers.get("etag") or "",
+                            "last_modified": resp.headers.get("last-modified") or "",
+                        }
                         break
                 else:
                     return ReadResult(ok=False, location=current, error=f"重定向超过 {max_redirects} 次，已中止")
@@ -370,14 +401,16 @@ class SourceReader:
                 handle.close()
                 text = self._read_pdf(tmp)
                 title = url.rsplit("/", 1)[-1] or "PDF 文档"
-                return self._finish_http(url, final_url, title, text, "pdf", len(raw))
+                return self._finish_http(url, final_url, title, text, "pdf", len(raw), validators=validator)
             finally:
                 tmp.unlink(missing_ok=True)
         text_raw = self._decode_bytes(raw)
         if "html" in content_type or text_raw.lstrip().lower().startswith(("<!doctype", "<html")):
             title, text = parsing.html_to_text(text_raw)
-            return self._finish_http(url, final_url, title, text, "html", len(raw))
-        return self._finish_http(url, final_url, url.rsplit("/", 1)[-1], text_raw, "text", len(raw))
+            return self._finish_http(url, final_url, title, text, "html", len(raw), validators=validator)
+        return self._finish_http(
+            url, final_url, url.rsplit("/", 1)[-1], text_raw, "text", len(raw), validators=validator
+        )
 
     def _content_type_allowed(self, content_type: str) -> bool:
         """只接受文本类与 PDF；二进制一律拒绝（审计 H-14）。"""
@@ -390,7 +423,32 @@ class SourceReader:
             return True  # 有些站点不返回 content-type，由后续解码兜底
         return any(normalized.startswith(prefix.lower()) for prefix in allowed)
 
-    def _finish_http(self, url: str, final_url: str, title: str, text: str, doc_type: str, size: int) -> ReadResult:
+    @staticmethod
+    def conditional_headers(prev_meta: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+        """按上次抓取的 ETag / Last-Modified 组装条件请求头。"""
+
+        if not prev_meta:
+            return {}
+        headers: Dict[str, str] = {}
+        etag = str(prev_meta.get("etag") or "").strip()
+        last_modified = str(prev_meta.get("last_modified") or "").strip()
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+        return headers
+
+    def _finish_http(
+        self,
+        url: str,
+        final_url: str,
+        title: str,
+        text: str,
+        doc_type: str,
+        size: int,
+        *,
+        validators: Optional[Mapping[str, str]] = None,
+    ) -> ReadResult:
         text = (text or "").strip()
         if not text:
             return ReadResult(ok=False, location=url, error="网页正文为空（可能需要 JS 渲染或存在访问限制）")
@@ -405,7 +463,13 @@ class SourceReader:
             source_type=info["source_type"],
             content_hash=digest,
             bytes_read=size,
-            metadata={**info, "requested_url": url, "accessed_at": utcnow_iso()},
+            metadata={
+                **info,
+                "requested_url": url,
+                "accessed_at": utcnow_iso(),
+                "etag": str((validators or {}).get("etag") or ""),
+                "last_modified": str((validators or {}).get("last_modified") or ""),
+            },
         )
 
 
