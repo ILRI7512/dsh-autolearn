@@ -268,9 +268,20 @@ function requestOnce(
         },
         agent: isHttps ? HTTPS_AGENT : HTTP_AGENT,
         servername: isHttps && !isIP(target.hostname) ? target.hostname : undefined,
-        lookup: (_hostname, _opts, callback) => {
+        lookup: (_hostname, opts, callback) => {
           // 固定为已校验地址，防止 DNS rebinding 换到内网。
-          callback(null, target.address, target.family as 4 | 6)
+          // Node 20+ 某些路径会以 { all: true } 调用 lookup，此时回调必须给
+          // 地址数组；否则 net 会抛 ERR_INVALID_IP_ADDRESS（Invalid IP address: undefined）。
+          const cb = callback as unknown as (
+            error: Error | null,
+            address?: unknown,
+            family?: number,
+          ) => void
+          if (opts && (opts as { all?: boolean }).all) {
+            cb(null, [{ address: target.address, family: target.family }])
+          } else {
+            cb(null, target.address, target.family)
+          }
         },
       },
       (response) => {
