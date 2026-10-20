@@ -199,7 +199,19 @@ def is_non_verifiable(knowledge_type: str) -> bool:
     return knowledge_type in NON_VERIFIABLE_TYPES
 
 
-def evidence_requirements(knowledge_type: str) -> Tuple[int, int, float]:
+def evidence_requirements(knowledge_type: str, domain: str = "") -> Tuple[int, int, float]:
+    """知识类型的证据门槛；领域可以通过 DomainSpec.quality_overrides 覆盖。
+
+    例：量化领域的公式必须能重算且来源质量更高，这类"领域更严"的规则
+    以前只能改核心常量（审计 H-09 / P6），现在由注册表声明。
+    """
+
+    if domain:
+        from ..domains import REGISTRY
+
+        override = REGISTRY.get(domain).quality_overrides.get(knowledge_type)
+        if override:
+            return tuple(override)  # type: ignore[return-value]
     return EVIDENCE_REQUIREMENTS.get(knowledge_type, (1, 1, 0.60))
 
 
@@ -207,6 +219,8 @@ def effective_requirements(
     knowledge_type: str,
     source_type: str,
     records: Sequence[VerificationRecord] = (),
+    *,
+    domain: str = "",
 ) -> Tuple[int, int, float]:
     """结合来源类型给出实际生效的证据门槛。
 
@@ -214,7 +228,7 @@ def effective_requirements(
     单来源即可满足最低证据要求；其余情况按知识类型的一般门槛执行。
     """
 
-    min_count, min_independent, min_quality = evidence_requirements(knowledge_type)
+    min_count, min_independent, min_quality = evidence_requirements(knowledge_type, domain)
     official = any(
         r.result == VerificationResult.PASS.value
         and r.method == VerificationMethod.OFFICIAL_DOC_CHECK.value
@@ -333,7 +347,9 @@ def _verify_guard(chunk: Chunk, records: Sequence[VerificationRecord]) -> Tuple[
             + "，结果必须是 pass 且包含证据"
         ]
 
-    min_count, min_independent, min_quality = effective_requirements(ktype, chunk.source_type, records)
+    min_count, min_independent, min_quality = effective_requirements(
+        ktype, chunk.source_type, records, domain=chunk.domain
+    )
     independent_sources = {
         str(entry.get("source_id") or entry.get("publisher") or entry.get("url") or "")
         for record in passing

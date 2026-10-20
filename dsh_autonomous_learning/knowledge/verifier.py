@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
+from .quality import assess_quality
 from ..core.models import (
     Chunk,
     KnowledgeStatus,
@@ -243,7 +244,7 @@ class KnowledgeVerifier:
         chunk.verification_method = method
         chunk.verification_evidence = evidence_list
         min_count, min_indep, min_quality = effective_requirements(
-            chunk.knowledge_type, chunk.source_type, records
+            chunk.knowledge_type, chunk.source_type, records, domain=chunk.domain
         )
         requirements_met = (
             chunk.evidence_count >= min_count
@@ -289,6 +290,15 @@ class KnowledgeVerifier:
         chunk.level = compute_level(chunk, records)
         chunk.updated_at = utcnow_iso()
 
+        # 质量评估：按公开权重的可解释分量，随核验结果一起刷新
+        quality = assess_quality(
+            {
+                **chunk.to_row(),
+                "verification_status": chunk.verification_status,
+            },
+            records,
+        )
+
         self.metadata.update_chunk(
             chunk_id,
             {
@@ -301,6 +311,8 @@ class KnowledgeVerifier:
                 "evidence_independence": chunk.evidence_independence,
                 "confidence": chunk.confidence,
                 "confidence_basis": chunk.confidence_basis,
+                "quality_score": quality.score,
+                "quality_components": quality.components,
                 "updated_at": chunk.updated_at,
             },
         )
@@ -431,7 +443,7 @@ class KnowledgeVerifier:
         independence: int,
     ) -> tuple[str, List[str]]:
         reasons: List[str] = []
-        min_count, min_indep, min_quality = evidence_requirements(chunk.knowledge_type)
+        min_count, min_indep, min_quality = evidence_requirements(chunk.knowledge_type, chunk.domain)
         if not evidence:
             return VerificationResult.FAIL.value, ["没有任何来源证据"]
         reasons.append(f"收集到 {len(evidence)} 条来源证据，独立来源 {independence} 个")

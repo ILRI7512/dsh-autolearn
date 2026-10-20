@@ -33,7 +33,8 @@ from ..knowledge.partitions import (
     project_partitions,
 )
 from ..knowledge.partitions import ensure_partition_allowed
-from ..knowledge.verifier import KnowledgeVerifier
+from ..knowledge.verifier import KnowledgeVerifier, chunk_from_dict
+from .state_machine import compute_level, evaluate_transition
 from ..knowledge.version_manager import VersionManager
 from ..practice.experiment_runner import ExperimentRunner
 from ..practice.task_generator import PracticeTaskGenerator
@@ -52,6 +53,7 @@ from .gap_analyzer import KnowledgeGapAnalyzer
 from .model_adapter import BaseModel, build_model
 from .models import (
     Document,
+    VerificationRecord,
     KnowledgeStatus,
     LearningLevel,
     Partition,
@@ -1004,7 +1006,18 @@ class LearningOrchestrator:
                     expected=spec.get("expected"),
                 )
                 executed += 1
-                results.append({"practice_id": item["practice_id"], "result": outcome["result"]})
+                promoted = ""
+                if outcome["result"] == "pass":
+                    promoted = self._mark_practiced(
+                        item["chunk_id"], method="formula_recompute", practice_id=item["practice_id"]
+                    )
+                results.append(
+                    {
+                        "practice_id": item["practice_id"],
+                        "result": outcome["result"],
+                        "status_after": promoted or None,
+                    }
+                )
             elif item["kind"] == "code_example":
                 if self.rt.permissions.mode != "lab":
                     skipped.append(
@@ -1024,11 +1037,17 @@ class LearningOrchestrator:
                         project_id=project_id,
                     )
                     executed += 1
+                    promoted = ""
+                    if payload.get("ok"):
+                        promoted = self._mark_practiced(
+                            item["chunk_id"], method="code_test", practice_id=item["practice_id"]
+                        )
                     results.append(
                         {
                             "practice_id": item["practice_id"],
                             "ok": payload.get("ok"),
                             "exit_code": payload.get("exit_code"),
+                            "status_after": promoted or None,
                         }
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1043,6 +1062,100 @@ class LearningOrchestrator:
             "results": results[:10],
             "skipped": skipped[:10],
         }
+
+    def _mark_practiced(self, chunk_id: str, *, method: str, practice_id: str) -> str:
+        """实践成功 → practiced（L4）。以前 practiced 是死状态，从来没有写入点。"""
+
+        row = self.metadata.get_chunk(chunk_id)
+        if not row:
+            return ""
+        chunk = chunk_from_dict(row)
+        if chunk.status not in {
+            KnowledgeStatus.VERIFIED.value,
+            KnowledgeStatus.PENDING_VERIFICATION.value,
+        }:
+            return chunk.status
+        self.metadata.add_verification(
+            VerificationRecord(
+                record_id=new_id("vrf"),
+                chunk_id=chunk_id,
+                method=method,
+                result="pass",
+                evidence=[
+                    {
+                        "kind": "practice_result",
+                        "practice_id": practice_id,
+                        "source_id": row.get("source_id", ""),
+                    }
+                ],
+                notes=f"实践执行成功（{method}）",
+                verifier="system",
+            ).to_row()
+        )
+        records = [
+            VerificationRecord(**{k: r[k] for k in VerificationRecord.__dataclass_fields__ if k in r})
+            for r in self.metadata.list_verifications(chunk_id)
+        ]
+        decision = evaluate_transition(chunk, KnowledgeStatus.PRACTICED.value, records)
+        if not decision.allowed:
+            return chunk.status
+        chunk.status = KnowledgeStatus.PRACTICED.value
+        self.metadata.update_chunk(
+            chunk_id,
+            {
+                "status": chunk.status,
+                "level": compute_level(chunk, records),
+                "updated_at": utcnow_iso(),
+            },
+        )
+        return KnowledgeStatus.PRACTICED.value
+
+    def _mark_evaluated(self, project_id: str, *, run_id: str, goal_met: bool) -> int:
+        """已实践且无未决冲突的知识 → evaluated（L5）。"""
+
+        rows = self.metadata.list_chunks(
+            ChunkFilter(project_id=project_id, statuses=[KnowledgeStatus.PRACTICED.value]), limit=50
+        )
+        if not rows:
+            return 0
+        conflicted = {
+            c["chunk_id"]
+            for c in self.metadata.query_dicts(
+                "SELECT chunk_a AS chunk_id FROM conflicts WHERE project_id=? AND status='open' "
+                "UNION SELECT chunk_b AS chunk_id FROM conflicts WHERE project_id=? AND status='open'",
+                (project_id, project_id),
+            )
+        }
+        promoted = 0
+        for row in rows:
+            chunk = chunk_from_dict(row)
+            meta = self._parse_json_obj(chunk.metadata)
+            if isinstance(meta, dict) and meta.get("invalidated_reason"):
+                continue
+            meta = dict(meta) if isinstance(meta, dict) else {}
+            meta["evaluation"] = {"run_id": run_id, "goal_met": bool(goal_met)}
+            records = [
+                VerificationRecord(**{k: r[k] for k in VerificationRecord.__dataclass_fields__ if k in r})
+                for r in self.metadata.list_verifications(chunk.chunk_id)
+            ]
+            chunk.metadata = meta
+            decision = evaluate_transition(chunk, KnowledgeStatus.EVALUATED.value, records)
+            if not decision.allowed:
+                continue
+            if row["chunk_id"] in conflicted:
+                continue
+            chunk.status = KnowledgeStatus.EVALUATED.value
+            self.metadata.update_chunk(
+                chunk.chunk_id,
+                {
+                    "status": chunk.status,
+                    "level": compute_level(chunk, records),
+                    "metadata": meta,
+                    "updated_at": utcnow_iso(),
+                },
+            )
+            promoted += 1
+        return promoted
 
     def _task_evaluate(self, task: Mapping[str, Any]) -> Dict[str, Any]:
         project_id = task["project_id"]
@@ -1061,9 +1174,13 @@ class LearningOrchestrator:
                 created += len(self.rt.planner.tasks_for_conflict(project, conflict))
             except Exception:  # noqa: BLE001
                 continue
+        evaluated = self._mark_evaluated(
+            project_id, run_id=str(task.get("run_id") or ""), goal_met=bool(evaluation["goal_met"])
+        )
         return {
             "new_knowledge": 0,
             "progress": True,
+            "evaluated_chunks": evaluated,
             "goal_met": evaluation["goal_met"],
             "coverage_rate": evaluation["metrics"]["coverage_rate"],
             "verification_rate": evaluation["metrics"]["verification_rate"],

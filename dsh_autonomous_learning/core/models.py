@@ -435,6 +435,9 @@ class Chunk:
     application: str = ""
     implementation: str = ""
     anti_patterns: str = ""
+    #: 质量评估（可解释分量见 knowledge/quality.py）
+    quality_score: float = 0.0
+    quality_components: Dict[str, Any] = field(default_factory=dict)
     limitations: str = ""
     license_status: str = LicenseStatus.UNKNOWN.value
     visibility: str = "project"  # project | global

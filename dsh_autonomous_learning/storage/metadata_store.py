@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 from ..core.models import new_id
 from .tokenizer import BM25Params, expand_query
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: 逐版本迁移步骤（在新库上由 SCHEMA_SQL 直接建好，旧库按版本号补齐）。
 #: 每条语句都必须是幂等的：迁移可能在部分失败后重跑。
@@ -44,6 +44,10 @@ MIGRATIONS: Dict[int, Tuple[str, ...]] = {
     4: (
         # 真实阶段进度：registered/fetched/parsed/extracted/classified/indexed
         "ALTER TABLE documents ADD COLUMN stages TEXT NOT NULL DEFAULT '{}'",
+    ),
+    7: (
+        "ALTER TABLE chunks ADD COLUMN quality_score REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE chunks ADD COLUMN quality_components TEXT NOT NULL DEFAULT '{}'",
     ),
     6: (
         # embedding 缓存：同内容同向量器只算一次（审计 S-15）
@@ -225,6 +229,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     application           TEXT NOT NULL DEFAULT '',
     implementation        TEXT NOT NULL DEFAULT '',
     anti_patterns         TEXT NOT NULL DEFAULT '',
+    quality_score         REAL NOT NULL DEFAULT 0,
+    quality_components    TEXT NOT NULL DEFAULT '{}',
     license_status        TEXT NOT NULL DEFAULT 'unknown',
     visibility            TEXT NOT NULL DEFAULT 'project',
     metadata              TEXT NOT NULL DEFAULT '{}',
@@ -452,7 +458,7 @@ JSON_COLUMNS: Dict[str, Tuple[str, ...]] = {
     "runs": ("summary",),
     "sources": ("metadata",),
     "documents": ("stages",),
-    "chunks": ("verification_evidence", "metadata", "tags"),
+    "chunks": ("verification_evidence", "metadata", "tags", "quality_components"),
     "verification_records": ("evidence",),
     "conflicts": ("evidence",),
     "duplicates": (),
@@ -508,7 +514,7 @@ COLUMNS: Dict[str, Tuple[str, ...]] = {
         "title", "content", "summary", "knowledge_type", "status", "level", "source_id",
         "source_url", "source_title", "source_type", "author_or_publisher", "published_at",
         "tags", "source_version", "source_excerpt", "core_principle", "reasoning",
-        "application", "implementation", "anti_patterns",
+        "application", "implementation", "anti_patterns", "quality_score", "quality_components",
         "accessed_at", "language", "content_hash", "version", "source_quality",
         "evidence_count", "evidence_independence", "confidence", "confidence_basis",
         "verification_status", "verification_method", "verification_evidence",
