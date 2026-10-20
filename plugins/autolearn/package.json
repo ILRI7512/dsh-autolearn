@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-autolearn",
-  "version": "1.2.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
-  "description": "DSH autonomous-learning plugin: registers the Python engine as an MCP server and adds a settings card.",
+  "description": "DSH autonomous-learning plugin: TypeScript engine, 11 native DSH tools, evidence-based verification, strict code-execution sandbox.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

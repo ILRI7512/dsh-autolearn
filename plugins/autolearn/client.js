@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
     const MODE_OPTIONS = [
       { value: 'assisted', label: '辅助（assisted）', hint: '高风险操作需要你审批' },
       { value: 'auto', label: '自动（auto）', hint: '在授权范围内自动提取与核验' },
-      { value: 'lab', label: '实验（lab）', hint: '允许在受限目录执行代码' },
+      { value: 'lab', label: '实验（lab）', hint: '允许在 strict 沙盒中执行 JavaScript' },
     ]
 
     const token = (name, fallback) => `var(${name}, ${fallback})`
@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
 
     function ConfigCard() {
       const [state, setState] = React.useState({ phase: 'loading' })
-      const [draft, setDraft] = React.useState({ mode: 'assisted', dataDir: '', dailyBudgetUsd: 1 })
+      const [draft, setDraft] = React.useState({ mode: 'assisted', dataDir: '', dailyBudgetUsd: 1, maxTasksPerRun: 30 })
       const [saving, setSaving] = React.useState(false)
       const [message, setMessage] = React.useState('')
 
@@ -75,6 +75,7 @@ window.__ModuleLoader__.load({
               mode: data.settings.mode,
               dataDir: data.settings.dataDir || '',
               dailyBudgetUsd: data.settings.dailyBudgetUsd,
+              maxTasksPerRun: data.settings.maxTasksPerRun,
             })
             setState({ phase: 'ready', data })
             setMessage('')
@@ -105,8 +106,8 @@ window.__ModuleLoader__.load({
       }, [draft, state.data])
 
       const resetDefaults = React.useCallback(() => {
-        const defaults = (state.data && state.data.defaults) || { mode: 'assisted', dataDir: '', dailyBudgetUsd: 1 }
-        setDraft({ mode: defaults.mode, dataDir: '', dailyBudgetUsd: defaults.dailyBudgetUsd })
+        const defaults = (state.data && state.data.defaults) || { mode: 'assisted', dataDir: '', dailyBudgetUsd: 1, maxTasksPerRun: 30 }
+        setDraft({ mode: defaults.mode, dataDir: '', dailyBudgetUsd: defaults.dailyBudgetUsd, maxTasksPerRun: defaults.maxTasksPerRun })
         setMessage('已恢复默认值，点击保存后生效')
       }, [state.data])
 
@@ -124,6 +125,7 @@ window.__ModuleLoader__.load({
       const effectiveDataDir =
         state.data && state.data.effectiveDataDir ? state.data.effectiveDataDir : state.data?.effectiveDataDir || ''
       const notes = (state.data && state.data.notes) || {}
+      const security = state.data && state.data.security
 
       return h(
         'div',
@@ -142,12 +144,12 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { marginBottom: 4, fontSize: 14, fontWeight: 600 } },
-          '自主学习 · 配置',
+          '自主学习 · 配置与安全',
         ),
         h(
           'div',
           { style: { marginBottom: 18, fontSize: 12, lineHeight: 1.6, color: COLORS.secondary } },
-          '这些值保存在引擎目录的 data/settings.json，与学习引擎共用同一份；不会改变 DSH 的全局权限设置。',
+          '这些值保存在引擎目录的 data/settings.json，与 TypeScript 学习引擎共用；安全边界来自 config.json，只读展示，不会改变 DSH 的全局权限设置。',
         ),
 
         h(
@@ -168,7 +170,7 @@ window.__ModuleLoader__.load({
           Row,
           {
             label: '数据目录',
-            hint: `留空使用默认目录：${effectiveDataDir || 'data/'}。${notes.reconnect || '变更后需重连 MCP 连接。'}`,
+            hint: `留空使用默认目录：${effectiveDataDir || 'data/'}。${notes.reconnect || '数据目录变更后需重启 DSH。'}`,
           },
           h('input', {
             type: 'text',
@@ -196,6 +198,48 @@ window.__ModuleLoader__.load({
             style: { ...fieldStyle, maxWidth: 180 },
           }),
         ),
+
+        h(
+          Row,
+          {
+            label: '每轮任务上限',
+            hint: '1–200；与每日预算一起在下一轮学习开始时生效。',
+          },
+          h('input', {
+            type: 'number',
+            min: 1,
+            max: 200,
+            step: 1,
+            value: draft.maxTasksPerRun,
+            onChange: (event) => setDraft({ ...draft, maxTasksPerRun: Number(event.target.value) }),
+            style: { ...fieldStyle, maxWidth: 180 },
+          }),
+        ),
+
+        h('div', { style: { marginTop: 8, marginBottom: 6, fontSize: 13, fontWeight: 600, color: COLORS.label } }, '运行与安全（只读）'),
+        security
+          ? h(
+              'div',
+              { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 } },
+              ...[
+                ['网络访问', security.allow_network ? '允许（受白名单约束）' : '关闭'],
+                ['私有网络', security.allow_private_networks ? '允许' : '禁止'],
+                ['代码执行沙盒', security.exec_sandbox === 'strict' ? 'strict（降权 + netns + 权限模型）' : 'process（无沙盒，显式）'],
+                ['执行限制', `${security.exec_timeout_s}s / ${security.exec_memory_mb}MB / 产物 ${security.exec_artifact_mb}MB`],
+                ['审计日志', security.audit_log ? '开启' : '关闭'],
+                ['密钥扫描', security.block_secret_patterns ? '开启' : '关闭'],
+              ].map(([key, value]) =>
+                h(
+                  'div',
+                  { key, style: { padding: '8px 10px', borderRadius: 8, background: COLORS.field, border: `1px solid ${COLORS.border}` } },
+                  h('div', { style: { fontSize: 11, color: COLORS.secondary } }, key),
+                  h('div', { style: { fontSize: 12, fontWeight: 600, marginTop: 2, color: COLORS.label } }, value),
+                ),
+              ),
+            )
+          : h('div', { style: { fontSize: 12, color: COLORS.secondary, marginBottom: 8 } }, '未读取到 config.json 的 security 段（引擎目录未定位）。'),
+        h('div', { style: { fontSize: 11, lineHeight: 1.6, color: COLORS.secondary, marginBottom: 12 } }, (state.data && state.data.boundary) || ''),
+        h('div', { style: { fontSize: 11, color: COLORS.secondary, marginBottom: 12 } }, (notes.security || '安全边界由 config.json 控制；修改后需重启 DSH。')),
 
         h(
           'div',

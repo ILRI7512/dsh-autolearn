@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Autolearn Approval Gate",
-    "description": "Sends high-risk autonomous-learning tool calls to the DSH approval dialog before they touch the knowledge base."
+    "title": "Autolearn Approval (MCP legacy)",
+    "description": "Only for the optional MCP adapter (mcp__autolearn__*). Native DSH tools use the built-in tools/pre-execute hook with fail-closed decisions."
   }
 }

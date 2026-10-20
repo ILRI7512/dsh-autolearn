@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Autonomous Learning",
-    "description": "Plans bounded learning rounds, builds a traceable knowledge base, verifies with evidence, and reports what is still unverified."
+    "description": "Plans bounded learning rounds, extracts and verifies knowledge with evidence, and reports what remains unverified. Registers 11 native DSH tools; code execution defaults to a strict sandbox."
   }
 }

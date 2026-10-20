@@ -1,53 +1,44 @@
 # @local/dsh-autolearn
 
-把自主学习引擎打包成 **DSH 插件**（配置型 bundle）：安装即自动注册 MCP stdio 服务器，
-无需手工在连接器面板里填命令与路径。
+DSH 自主学习插件（v2.1）：**TypeScript 引擎 + 11 个 DSH 原生工具**。
+默认不注册 MCP 子进程；`tools/pre-execute` 审批与工具注册都在本插件内完成。
 
 ## 安装后的形态
 
 | 项 | 值 |
 | --- | --- |
-| 插件名 | `@local/dsh-autolearn`（Plugin Manager 可见） |
-| 提供的 MCP 服务器 | `serverName: autolearn` |
-| 工具名 | `mcp__autolearn__*`（63 个） |
-| 引擎位置 | `<repo>/dsh_autonomous_learning`（Python） |
-| 审批闸门 | 配套插件 `@local/dsh-autolearn-approval` |
-
-## patch 做了什么
-
-```yaml
-- insert:
-    - id: autolearn-mcp
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: autolearn
-        transport: stdio
-        command: 'python'
-        args: ['-m', 'dsh_autonomous_learning.plugin']
-        ...
-```
-
-`DSH_AL_HOST_APPROVAL=1` 让引擎把高危确认交给宿主审批；
-`DSH_AL_HOME` / `PYTHONPATH` 指向引擎目录与包父目录。
+| 插件名 | `@local/dsh-autolearn` |
+| 工具 | 11 个原生工具（`learning_*` / `knowledge_*` / `source_manage` / `system_*`） |
+| 引擎 | 仓库 `dist/`（Node ≥22.6，`node:sqlite`） |
+| 数据 | `<engine home>/data`（默认兼容 `dsh_autonomous_learning/data`） |
+| 审批 | 插件内 `tools/pre-execute` hook；危险操作独立 ask，异常失败关闭 |
+| MCP | **可选**，见 `dist/adapters/mcp/server.js`；默认不启用 |
 
 ## 设置卡
 
-插件在「设置 → 插件 → 自主学习」的 bundle 页上渲染一张配置卡（Client 半边
-`client.js` 注册进 `plugins.bundle.config`），包含：
+「设置 → 插件 → 自主学习」显示：
 
-| 字段 | 说明 | 生效时机 |
-| --- | --- | --- |
-| 运行模式 | assisted / auto / lab | 下一轮学习开始时 |
-| 数据目录 | 绝对路径；留空用 `data/` | 重连 MCP 连接后（DB 与索引在建连时打开） |
-| 每日预算 | USD，估算值，0–1000 | 下一轮学习开始时 |
+- 运行模式（assisted / auto / lab）
+- 数据目录（留空为默认；修改需重启 DSH）
+- 每日预算（USD）
+- 每轮任务上限（1–200）
+- **运行与安全（只读）**：网络访问、私有网络、代码执行沙盒、执行限制、审计日志、密钥扫描
 
-数据通过 Host 路由 `/dsh-autolearn/api/settings` 读写 `data/settings.json`，
-与 Python 引擎共用同一份文件（不引入第二套配置真相）。Host 半边同时校验
-模式枚举、预算范围与绝对路径。
+前四项写入 `<engine home>/data/settings.json`，下一轮学习开始时生效；
+安全边界来自 `<engine home>/config.json` 的 `security` 段，卡片只读展示，修改后需重启 DSH。
 
-## 验证
+## 安装
 
-1. Plugin Manager 中出现「自主学习 / Autonomous Learning」；
-2. 重启或安装后，Agent 工具列表出现 `mcp__autolearn__create_learning_project` 等；
-3. 调 `get_runtime_info` 应看到 `host_gate_installed=true` 与 `settings` 生效值；
-4. `curl http://127.0.0.1:58586/dsh-autolearn/api/settings` 返回当前设置。
+```bash
+pnpm build
+dsh plugin --profile web add link:/path/to/dsh-autolearn/plugins/autolearn
+# profile package.json 的 dsh.profile.bundles 需包含 @local/dsh-autolearn
+```
+
+插件包内的 `cordis.patch.yml` 为空（不向 profile 树插入 MCP 条目）。
+
+## 与旧版的关系
+
+- v1.2 的 Python MCP 服务器保留为 legacy，但默认不再启动；
+- 旧审批插件 `@local/dsh-autolearn-approval` 仅用于可选 MCP 入口，原生工具不使用它；
+- 数据库 schema v7 与旧版兼容，旧知识库可直接打开。

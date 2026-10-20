@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "自主学习审批闸门",
-    "description": "把自主学习插件的高风险工具调用接入 DSH 审批弹窗：删除/失效/恢复、改库、执行代码与实验前都需要你确认。"
+    "title": "自主学习审批（MCP 兼容，legacy）",
+    "description": "仅用于可选的 MCP 入口（mcp__autolearn__*）。DSH 原生工具使用内置 tools/pre-execute hook：危险操作独立确认、判定失败关闭。"
   }
 }

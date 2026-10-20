@@ -65,6 +65,29 @@ export function engineHome(env = process.env) {
   return env.DSH_AL_HOME || findEngineHome()
 }
 
+/** 读取引擎 config.json 的 security 段（只读展示；不在卡片里修改安全边界）。 */
+export function readSecurity(env = process.env) {
+  try {
+    const home = engineHome(env)
+    if (!home) return null
+    const raw = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'))
+    const security = (raw && raw.security) || {}
+    return {
+      allow_network: security.allow_network === true,
+      allowed_domains: Array.isArray(security.allowed_domains) ? security.allowed_domains : [],
+      allow_private_networks: security.allow_private_networks === true,
+      exec_sandbox: security.exec_sandbox === 'process' ? 'process' : 'strict',
+      exec_timeout_s: Number(security.exec_timeout_s) || 10,
+      exec_memory_mb: Number(security.exec_memory_mb) || 512,
+      exec_artifact_mb: Number(security.exec_artifact_mb) || 16,
+      audit_log: security.audit_log !== false,
+      block_secret_patterns: security.block_secret_patterns !== false,
+    }
+  } catch {
+    return null
+  }
+}
+
 export function settingsPath(env = process.env) {
   if (env.DSH_AL_SETTINGS_FILE) return env.DSH_AL_SETTINGS_FILE
   const home = engineHome(env)
@@ -175,9 +198,13 @@ export function settingsRoute(env = process.env) {
           effectiveDataDir: settings.dataDir || defaultDataDir(env),
           modes: MODES,
           settingsPath: settingsPath(env),
+          security: readSecurity(env),
+          securityPath: engineHome(env) ? join(engineHome(env), 'config.json') : '',
+          boundary: '原生工具使用内置审批 hook（失败关闭）；代码执行默认 strict 沙盒（降权 + 网络命名空间 + Node Permission Model），不是内核沙箱。',
           notes: {
-            live: '模式与每日预算在下一轮学习开始时生效',
-            reconnect: '数据目录变更需要重连 MCP 连接（数据库与索引在建连时打开）',
+            live: '模式 / 每日预算 / 每轮任务上限在下一轮学习开始时生效',
+            reconnect: '数据目录变更需要重启 DSH（数据库与索引在引擎打开时建立）',
+            security: '安全边界由 config.json 的 security 段控制；此处只读展示，修改后需重启 DSH。',
           },
         })
         return
