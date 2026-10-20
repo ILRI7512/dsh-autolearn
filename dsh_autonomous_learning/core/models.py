@@ -46,7 +46,19 @@ def normalize_text(text: str) -> str:
 
 
 def content_fingerprint(text: str) -> str:
+    """内容指纹：只由正文决定，不含来源/文档 ID。
+
+    混入 document_id 会让"同一段文字出现在两个文件里"得到不同指纹，
+    跨文档去重永远不会触发（审计 F-06）。
+    """
+
     return stable_hash(normalize_text(text))
+
+
+def make_chunk_id(project_id: str, content_hash: str) -> str:
+    """知识片段 ID：项目 + 内容指纹 → 同一内容在同一项目内是同一实体（幂等）。"""
+
+    return "chunk_" + stable_hash(f"{project_id}|{content_hash}", 24)
 
 
 def clamp(value: float, low: float, high: float) -> float:

@@ -245,10 +245,11 @@ class KnowledgeStore:
         """
 
         if not chunks:
-            return {"added": 0, "updated": 0, "duplicates": [], "chunks": []}
+            return {"added": 0, "updated": 0, "duplicates": [], "skipped": [], "chunks": []}
         prepared: List[Dict[str, Any]] = []
         seen_content: Dict[str, str] = {}
         duplicates: List[Dict[str, Any]] = []
+        skipped_duplicates: List[Dict[str, Any]] = []
         for raw in chunks:
             cid = str(raw.get("chunk_id") or "")
             existing = self.metadata.get_chunk(cid) if cid else None
@@ -293,7 +294,9 @@ class KnowledgeStore:
             else:
                 chunk["content_hash"] = fp
             existing_same = self.metadata.find_chunks_by_hash(fp, chunk.get("project_id"))
-            same_other = [c for c in existing_same if c["chunk_id"] != chunk["chunk_id"]]
+            same_other = [
+                c for c in existing_same if c["chunk_id"] != chunk["chunk_id"] and not c.get("invalidated_at")
+            ]
             dup_of = same_other[0]["chunk_id"] if same_other else seen_content.get(fp, "")
             if dup_of:
                 duplicates.append(
@@ -306,6 +309,11 @@ class KnowledgeStore:
                     similarity=1.0,
                     reason="content_hash",
                 )
+                # 同一项目内同内容只能有一个活跃实体：重复内容不再写入，
+                # 由 duplicates 表记录关系，等待人工决定保留哪一份溯源。
+                if not existing:
+                    skipped_duplicates.append({"chunk_id": chunk["chunk_id"], "duplicate_of": dup_of})
+                    continue
             seen_content.setdefault(fp, chunk["chunk_id"])
             prepared.append(chunk)
 
@@ -348,6 +356,7 @@ class KnowledgeStore:
             "added": added,
             "updated": updated,
             "duplicates": duplicates,
+            "skipped": skipped_duplicates,
             "chunks": [c["chunk_id"] for c in prepared],
         }
 

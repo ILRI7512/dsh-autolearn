@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 from ..core.models import new_id
 from .tokenizer import BM25Params, expand_query
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: 逐版本迁移步骤（在新库上由 SCHEMA_SQL 直接建好，旧库按版本号补齐）。
 #: 每条语句都必须是幂等的：迁移可能在部分失败后重跑。
@@ -33,6 +33,13 @@ MIGRATIONS: Dict[int, Tuple[str, ...]] = {
     2: (
         "CREATE INDEX IF NOT EXISTS idx_chunks_content_proj ON chunks(project_id, content_hash)",
         "CREATE INDEX IF NOT EXISTS idx_sources_location ON sources(project_id, location)",
+    ),
+    3: (
+        # 活跃片段在同一项目内按内容指纹唯一：重复内容只能有一个"活的"实体。
+        # 已失效/已被替代的行不参与约束，历史全部保留。
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_chunks_live_content "
+        "ON chunks(project_id, content_hash) "
+        "WHERE invalidated_at = '' AND content_hash <> ''",
     ),
 }
 
@@ -683,17 +690,20 @@ class MetadataStore:
             cur = conn.execute("SELECT value FROM meta WHERE key='schema_version'")
             row = cur.fetchone()
             if row is None:
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
-                    (str(SCHEMA_VERSION),),
-                )
-                return
-            found = int(row["value"])
+                # 新库也走一遍迁移：建表之后由迁移负责补约束，
+                # 保证"新库"与"老库升级后"结构完全一致。
+                conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '0')")
+                found = 0
+            else:
+                found = int(row["value"])
             if found > SCHEMA_VERSION:
                 raise StorageError(
                     f"数据库 schema 版本 {found} 高于代码支持的 {SCHEMA_VERSION}，请升级插件"
                 )
             for version in range(found + 1, SCHEMA_VERSION + 1):
+                hook = MIGRATION_HOOKS.get(version)
+                if hook is not None:
+                    hook(self, conn)
                 for statement in MIGRATIONS.get(version, ()):
                     try:
                         conn.execute(statement)
@@ -1484,6 +1494,38 @@ class MetadataStore:
     def stats(self) -> Dict[str, int]:
         tables = ["projects", "tasks", "sources", "documents", "chunks", "verification_records", "conflicts", "duplicates", "edges", "gaps", "practice_tasks", "experiments", "audit_log"]
         return {t: self.count(t) for t in tables}
+
+
+def _migrate_v3(store: "MetadataStore", conn: sqlite3.Connection) -> None:
+    """v3：把同一项目内的重复活跃片段标记为 superseded（保留数据），再建唯一索引。
+
+    不删除任何行：旧的重复实体转为 ``invalidated_at`` 非空 + ``superseded_by``
+    指向保留项，检索/统计按"活跃片段"口径即可，历史仍可追溯。
+    """
+
+    groups = conn.execute(
+        "SELECT project_id, content_hash, COUNT(*) AS n FROM chunks "
+        "WHERE invalidated_at = '' AND content_hash <> '' "
+        "GROUP BY project_id, content_hash HAVING n > 1"
+    ).fetchall()
+    now = _now()
+    for group in groups:
+        rows = conn.execute(
+            "SELECT chunk_id, status, version, created_at FROM chunks "
+            "WHERE project_id=? AND content_hash=? AND invalidated_at='' "
+            "ORDER BY (verification_status='verified') DESC, version DESC, created_at ASC",
+            (group["project_id"], group["content_hash"]),
+        ).fetchall()
+        keep = rows[0]["chunk_id"]
+        for row in rows[1:]:
+            conn.execute(
+                "UPDATE chunks SET invalidated_at=?, superseded_by=?, status='superseded', updated_at=? "
+                "WHERE chunk_id=?",
+                (now, keep, now, row["chunk_id"]),
+            )
+
+
+MIGRATION_HOOKS: Dict[int, Any] = {3: _migrate_v3}
 
 
 def _coerce_row(table: str, row: Any) -> Mapping[str, Any]:

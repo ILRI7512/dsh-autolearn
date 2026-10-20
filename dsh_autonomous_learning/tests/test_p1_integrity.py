@@ -202,12 +202,16 @@ def test_concurrent_writers_do_not_lose_vectors(tmp_path):
 
 
 def test_duplicate_content_is_registered_at_write_time(runtime):
-    """同内容不同来源：两条都保留，但重复关系必须落库，不能只报告。"""
+    """同内容重复提交：不写第二份，但必须把重复关系落库（不能只报告）。"""
 
     text = "完全相同的知识内容，用于验证写入时即登记重复关系。"
     make_chunk(runtime, chunk_id="d1", content=text)
-    make_chunk(runtime, chunk_id="d2", content=text)
+    result = runtime.store.add_chunks(
+        [{"chunk_id": "d2", "project_id": "prj_test", "title": "重复", "content": text}]
+    )
+    assert result["skipped"], result
     rows = runtime.metadata.list_duplicates("prj_test")
     assert rows, "写入时就应登记 duplicates"
     assert {rows[0]["chunk_a"], rows[0]["chunk_b"]} == {"d1", "d2"}
-    assert runtime.metadata.get_chunk("d1") and runtime.metadata.get_chunk("d2")
+    assert runtime.metadata.get_chunk("d1") is not None
+    assert runtime.metadata.get_chunk("d2") is None

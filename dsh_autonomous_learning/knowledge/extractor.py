@@ -29,6 +29,8 @@ from ..core.models import (
     SourceType,
     stable_hash,
     utcnow_iso,
+    content_fingerprint,
+    make_chunk_id,
 )
 from ..sources.parser import chunk_text, detect_language, extract_code_blocks, split_sections, summarize
 from . import classifier as classification
@@ -268,10 +270,11 @@ class KnowledgeExtractor:
     ) -> KnowledgeDraft:
         title = section_title.strip() or (chunk.splitlines()[0][:60] if chunk else "未命名知识")
         cls = classification.classify(chunk, title=title, domain=str(project.get("domain") or ""))
-        content_hash = stable_hash(f"{document.get('document_id')}|{chunk}")
-        chunk_id = "chunk_" + stable_hash(
-            f"{project.get('project_id')}|{document.get('document_id')}|{content_hash}", 24
-        )
+        # 内容指纹只由**正文**决定：混入 document_id 会让"同一段文字换个文件"
+        # 变成不同指纹，跨文档去重永远不触发。
+        content_hash = content_fingerprint(chunk)
+        # 知识 ID 也只由"项目 + 内容"决定：同一内容重复入库是同一实体（幂等）。
+        chunk_id = make_chunk_id(str(project.get("project_id") or ""), content_hash)
         formulas = extract_formulas(chunk)
         codes = extract_code_examples(chunk)
         assumptions = identify_assumptions(chunk)
@@ -382,11 +385,11 @@ class KnowledgeExtractor:
             ktype = str(item.get("knowledge_type") or "fact")
             if ktype not in KnowledgeType.values():
                 ktype = KnowledgeType.CONCEPT.value
-            content_hash = stable_hash(f"{document.get('document_id')}|model|{content}")
+            content_hash = content_fingerprint(content)
             cls = classification.classify(content, title=title, domain=str(project.get("domain") or ""))
             drafts.append(
                 KnowledgeDraft(
-                    chunk_id="chunk_" + stable_hash(f"{project.get('project_id')}|model|{content_hash}", 24),
+                    chunk_id=make_chunk_id(str(project.get("project_id") or ""), content_hash),
                     project_id=str(project.get("project_id")),
                     document_id=str(document.get("document_id")),
                     title=title,
