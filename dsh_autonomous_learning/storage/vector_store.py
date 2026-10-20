@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -290,6 +291,9 @@ class KnowledgeStore:
                         for pos, i in enumerate(missing)
                     ]
                 )
+                limit = int(getattr(self.embedding_config, "max_cache_entries", 0) or 0)
+                if limit:
+                    self.metadata.prune_embedding_cache(limit)
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return matrix / norms
@@ -947,20 +951,69 @@ class KnowledgeStore:
             "db": db_target.name,
             "index": index_target.name,
             "chunks": self.metadata.count_chunks(),
+            "sources": int(self.metadata.scalar("SELECT COUNT(*) FROM sources", (), 0) or 0),
+            "documents": int(self.metadata.scalar("SELECT COUNT(*) FROM documents", (), 0) or 0),
+            "chunks_sha256": _file_sha256(db_target),
             "note": note,
             "embedder": self.embedder.embedder_id,
+            "schema_version": _schema_version(),
         }
         (dest / f"backup-{stamp}.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         return {"backup_dir": str(dest), **manifest}
 
-    def restore(self, db_file: str | Path, index_dir: str | Path | None = None) -> Dict[str, Any]:
-        """从备份恢复；恢复前会把当前库另存为 .pre-restore 副本。"""
+    def verify_backup(self, manifest_path: str | Path) -> Dict[str, Any]:
+        """校验备份清单：schema 版本、向量器、文件校验和。不通过就明确说原因。"""
+
+        path = Path(manifest_path)
+        if not path.exists():
+            return {"ok": False, "issues": [f"备份清单不存在: {path}"]}
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "issues": [f"备份清单损坏: {exc}"]}
+        issues: List[str] = []
+        warnings: List[str] = []
+        declared = int(manifest.get("schema_version") or 0)
+        if declared > _schema_version():
+            issues.append(
+                f"备份 schema 版本 {declared} 高于当前代码 {_schema_version()}，请先升级插件"
+            )
+        db_name = manifest.get("db") or ""
+        db_path = path.parent / db_name
+        if not db_name or not db_path.exists():
+            issues.append(f"备份数据库缺失: {db_name or '<未声明>'}")
+        elif manifest.get("chunks_sha256") and _file_sha256(db_path) != manifest["chunks_sha256"]:
+            issues.append("备份数据库校验和不匹配（文件可能被截断或篡改）")
+        if manifest.get("embedder") and manifest["embedder"] != self.embedder.embedder_id:
+            warnings.append(
+                f"备份向量器 {manifest.get('embedder')} 与当前 {self.embedder.embedder_id} 不同，"
+                "恢复后需要 rebuild_vector_index()"
+            )
+        return {"ok": not issues, "issues": issues, "warnings": warnings, "manifest": manifest}
+
+    def restore(
+        self,
+        db_file: str | Path,
+        index_dir: str | Path | None = None,
+        *,
+        manifest_path: str | Path | None = None,
+    ) -> Dict[str, Any]:
+        """从备份恢复；恢复前会把当前库另存为 .pre-restore 副本。
+
+        加固点：先校验清单（可选但强烈建议），恢复过程用 try/finally 保证
+        失败后连接仍能重新打开，不会把 store 留在"关着"的状态。
+        """
 
         db_file = Path(db_file)
         if not db_file.exists():
             raise KnowledgeStoreError(f"备份数据库不存在: {db_file}")
+        verification: Dict[str, Any] = {"ok": True, "issues": [], "warnings": []}
+        if manifest_path is not None:
+            verification = self.verify_backup(manifest_path)
+            if not verification["ok"]:
+                raise KnowledgeStoreError("备份校验未通过：" + "；".join(verification["issues"]))
         safety = self.metadata.db_path.with_suffix(".pre-restore.sqlite3")
         with self.metadata.transaction() as conn:
             target = __import__("sqlite3").connect(str(safety))
@@ -969,13 +1022,16 @@ class KnowledgeStore:
             finally:
                 target.close()
         self.metadata.close()
-        shutil.copy2(db_file, self.metadata.db_path)
-        for suffix in ("-wal", "-shm"):
-            extra = Path(str(self.metadata.db_path) + suffix)
-            if extra.exists():
-                extra.unlink()
-        self.metadata.connect()
-        self.metadata.migrate()
+        try:
+            shutil.copy2(db_file, self.metadata.db_path)
+            for suffix in ("-wal", "-shm"):
+                extra = Path(str(self.metadata.db_path) + suffix)
+                if extra.exists():
+                    extra.unlink()
+        finally:
+            # 无论复制成功与否都要把连接恢复起来，否则 store 之后所有操作都会失败
+            self.metadata.connect()
+            self.metadata.migrate()
         if index_dir:
             idx = Path(index_dir)
             for name in (MANIFEST, IDS, VECTORS):
@@ -986,7 +1042,12 @@ class KnowledgeStore:
         self._last_error = ""
         self._load_index()
         report = self.check_integrity()
-        return {"restored_from": str(db_file), "safety_copy": str(safety), "integrity": report}
+        return {
+            "restored_from": str(db_file),
+            "safety_copy": str(safety),
+            "integrity": report,
+            "verification": verification,
+        }
 
     def export(self, path: str | Path, fmt: str = "jsonl", filters: Optional[ChunkFilter] = None) -> Dict[str, Any]:
         target = Path(path)
@@ -1035,6 +1096,20 @@ class KnowledgeStore:
 # --------------------------------------------------------------------------- #
 # 辅助
 # --------------------------------------------------------------------------- #
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _schema_version() -> int:
+    from .metadata_store import SCHEMA_VERSION
+
+    return int(SCHEMA_VERSION)
+
+
 def _index_text(chunk: Mapping[str, Any]) -> str:
     title = str(chunk.get("title") or "")
     summary = str(chunk.get("summary") or "")

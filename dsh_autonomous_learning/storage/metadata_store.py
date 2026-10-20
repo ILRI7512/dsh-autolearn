@@ -1334,6 +1334,23 @@ class MetadataStore:
                 written += 1
         return written
 
+    def prune_embedding_cache(self, keep: int) -> int:
+        """只保留最近 ``keep`` 条缓存（0 表示不淘汰），返回删除条数。"""
+
+        if keep <= 0:
+            return 0
+        total = int(self.scalar("SELECT COUNT(*) FROM embedding_cache", (), 0) or 0)
+        if total <= keep:
+            return 0
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "DELETE FROM embedding_cache WHERE cache_key IN ("
+                " SELECT cache_key FROM embedding_cache ORDER BY created_at ASC, cache_key ASC"
+                " LIMIT ?)",
+                (total - keep,),
+            )
+            return int(cur.rowcount)
+
     def embedding_cache_stats(self, embedder_id: str = "") -> Dict[str, int]:
         if embedder_id:
             total = self.scalar("SELECT COUNT(*) FROM embedding_cache WHERE embedder_id=?", (embedder_id,), 0)

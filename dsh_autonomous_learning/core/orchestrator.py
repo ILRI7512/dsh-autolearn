@@ -35,6 +35,7 @@ from ..knowledge.partitions import (
 from ..knowledge.partitions import ensure_partition_allowed
 from ..knowledge.verifier import KnowledgeVerifier, chunk_from_dict
 from .state_machine import compute_level, evaluate_transition
+from .telemetry import JsonlLogger, build_logger
 from ..knowledge.version_manager import VersionManager
 from ..practice.experiment_runner import ExperimentRunner
 from ..practice.task_generator import PracticeTaskGenerator
@@ -96,6 +97,7 @@ class Runtime:
     experiments: ExperimentRunner
     reporter: ReportGenerator
     policy: ExecutionPolicy
+    telemetry: JsonlLogger
 
     def close(self) -> None:
         self.metadata.close()
@@ -180,6 +182,7 @@ def build_runtime(config: Config, *, mode: Optional[str] = None) -> Runtime:
         experiments=ExperimentRunner(policy, metadata, config.paths.experiments_dir),
         reporter=ReportGenerator(metadata, store, evaluator, config.paths.reports_dir),
         policy=policy,
+        telemetry=build_logger(config, config.paths.data_dir),
     )
     return runtime
 
@@ -427,6 +430,18 @@ class LearningOrchestrator:
             if stop_reason == "error":
                 status = RunStatus.FAILED.value
             self.metadata.finish_run(run.run_id, status, summary, stop_reason)
+            self.rt.telemetry.log(
+                "run.finished",
+                run_id=run.run_id,
+                project_id=project_id,
+                iteration=iteration,
+                status=status,
+                stop_reason=stop_reason,
+                tasks=len(executed),
+                new_knowledge=new_knowledge,
+                llm_calls=tracker.state.llm_calls,
+                cost_estimate=round(tracker.state.cost_estimate, 6),
+            )
             self.metadata.record_metric("run", "new_knowledge", new_knowledge, project_id, run.run_id)
             if evaluation.get("goal_met"):
                 # 不自动把项目标记 completed：需要人工评审确认
@@ -462,7 +477,11 @@ class LearningOrchestrator:
             },
         )
         tracker.start_task()
+        started_at = time.monotonic()
         kind = task["kind"]
+        self.rt.telemetry.log(
+            "task.started", task_id=task_id, kind=kind, project_id=task["project_id"]
+        )
         project_id = task["project_id"]
         self.metadata.record_metric("task", f"start:{kind}", 1, project_id, run_id)
 
@@ -498,6 +517,15 @@ class LearningOrchestrator:
         else:
             raise ValueError(f"未知任务类型: {kind}")
 
+        self.rt.telemetry.log(
+            "task.completed",
+            task_id=task_id,
+            kind=kind,
+            project_id=project_id,
+            new_knowledge=int(result.get("new_knowledge", 0) or 0),
+            progress=bool(result.get("progress", False)),
+            elapsed_s=round(time.monotonic() - started_at, 3),
+        )
         self.metadata.update_task(
             task_id,
             {
@@ -525,6 +553,10 @@ class LearningOrchestrator:
                 "error": str(exc)[:1000],
                 "finished_at": utcnow_iso() if status == TaskStatus.FAILED.value else "",
             },
+        )
+        self.rt.telemetry.log(
+            "task.failed", level="WARN", task_id=task["task_id"], kind=task["kind"],
+            project_id=task["project_id"], status=status, error=str(exc)[:300],
         )
         if status == TaskStatus.FAILED.value:
             self._block_dependents(task["task_id"], task["project_id"], str(exc)[:300])

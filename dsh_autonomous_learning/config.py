@@ -92,6 +92,7 @@ class EmbeddingConfig:
     timeout_s: int = 30
     batch_size: int = 32
     cache: bool = True  # 同内容同向量器复用 embedding（关掉会全量重算）
+    max_cache_entries: int = 20000  # 缓存上限，超出按创建时间淘汰最旧（0 表示不限制）
 
     def validate(self) -> None:
         if self.provider not in {"hashing", "openai", "sentence_transformers"}:
